@@ -20,3 +20,6 @@ dist/
 data/
 *.log
 
+# Local config (personal)
+config.yaml
+

@@ -12,16 +12,67 @@ limits:
 # まずは「少数の信頼できるフィード」だけ入れて回し、必要になったら追加してください。
 rss_feeds:
   # --- news ---
-  # - url: "https://example.com/news.rss"
-  #   source_name: "Example News"
-  #   source_type: "news"
-  #   lang: "ja"
+  # 日本（経済/国際）
+  - url: "https://news.web.nhk/n-data/conf/na/rss/cat5.xml"
+    source_name: "NHKニュース（経済）"
+    source_type: "news"
+    lang: "ja"
+
+  - url: "https://news.web.nhk/n-data/conf/na/rss/cat6.xml"
+    source_name: "NHKニュース（国際）"
+    source_type: "news"
+    lang: "ja"
+
+  # 米国（マーケット/ビジネス：RSSの見出し/概要だけ取るのでログイン不要）
+  - url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+    source_name: "MarketWatch Top Stories"
+    source_type: "news"
+    lang: "en"
+
+  - url: "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain"
+    source_name: "WSJ Markets"
+    source_type: "news"
+    lang: "en"
+
+  # 米国（一次ソース：金融政策）
+  - url: "https://www.federalreserve.gov/feeds/press_monetary.xml"
+    source_name: "Federal Reserve（Monetary Policy）"
+    source_type: "news"
+    lang: "en"
 
   # --- ir ---
-  # - url: "https://example.com/ir.atom"
-  #   source_name: "Example IR"
+  # 米国：SEC EDGAR（全体の8-K）
+  - url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&count=100&output=atom"
+    source_name: "SEC EDGAR（8-K）"
+    source_type: "ir"
+    lang: "en"
+
+  # 日本：公式TDnetはRSS提供が見当たらないため、MVPでは後回し。
+  # 非公式だが実用的なRSS（yanoshin）を使う場合は以下を有効化。
+  #
+  # - url: "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.rss"
+  #   source_name: "TDnet（非公式RSS: yanoshin）"
   #   source_type: "ir"
-  #   lang: "en"
+  #   lang: "ja"
+
+  # --- lawsuit ---
+  # 訴訟/当局アクションの一次ソース（MVP）
+  # NOTE: source_typeは仕様上 news/ir/sns/other なので、ここでは news として収集し、
+  # 第2段AIで category=lawsuit 判定させる前提。
+  - url: "https://www.sec.gov/enforcement-litigation/litigation-releases/rss"
+    source_name: "SEC（Litigation Releases）"
+    source_type: "news"
+    lang: "en"
+
+  - url: "https://www.sec.gov/enforcement-litigation/administrative-proceedings/rss"
+    source_name: "SEC（Administrative Proceedings）"
+    source_type: "news"
+    lang: "en"
+
+  - url: "https://www.justice.gov/news/rss?type[0]=press_release&field_component=376&search_api_language=en&show_public_archived=0&require_all=0"
+    source_name: "DOJ Antitrust（Press Releases）"
+    source_type: "news"
+    lang: "en"
 
   # --- sns ---
   # - url: "https://example.com/sns.rss"

@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import certifi
 import feedparser
+import requests
 
 from ..types import Fragment, SourceType, iso_now
 from ..utils import isoformat_utc, strip_html
@@ -39,7 +41,11 @@ class RssCollector(Collector):
         until: datetime | None,
         limit: int,
     ) -> list[Fragment]:
-        parsed = feedparser.parse(self._feed.url)
+        feed_bytes = _fetch_feed(self._feed.url)
+        if feed_bytes is None:
+            return []
+
+        parsed = feedparser.parse(feed_bytes)
         fetched_at = iso_now()
 
         out: list[Fragment] = []
@@ -135,4 +141,27 @@ def _compose_text(*, title: str | None, summary: str) -> str:
     if summary:
         return summary
     return ""
+
+
+def _fetch_feed(url: str) -> bytes | None:
+    """
+    feedparserの内部HTTP取得は環境によってSSL検証で失敗しやすいので、
+    requests + certifi で確実に取得してから feedparser.parse(bytes) に渡す。
+    """
+    try:
+        r = requests.get(
+            url,
+            timeout=20,
+            allow_redirects=True,
+            # SECなどはUser-Agentを厳格に見ることがあるので、用途を明示する（MVP）
+            headers={"User-Agent": "invest_notify/0.1 (personal use; rss collector)"},
+            verify=certifi.where(),
+        )
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        # MVP：失敗しても全体を落とさず、当該フィードだけスキップ
+        # （必要なら後でloggingに置き換え）
+        print(f"[warn] failed to fetch RSS: {url} ({e})")
+        return None
 
