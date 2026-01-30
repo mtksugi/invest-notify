@@ -1,0 +1,31 @@
+# invest_notify MVP config example
+
+limits:
+  total_max: 200
+  per_type_max:
+    news: 120
+    ir: 40
+    sns: 40
+
+# RSS/Atom のフィードを並べる（MVPはここが収集対象）。
+# NOTE: あなたの思想としてURL列挙は最小にしたいはずなので、
+# まずは「少数の信頼できるフィード」だけ入れて回し、必要になったら追加してください。
+rss_feeds:
+  # --- news ---
+  # - url: "https://example.com/news.rss"
+  #   source_name: "Example News"
+  #   source_type: "news"
+  #   lang: "ja"
+
+  # --- ir ---
+  # - url: "https://example.com/ir.atom"
+  #   source_name: "Example IR"
+  #   source_type: "ir"
+  #   lang: "en"
+
+  # --- sns ---
+  # - url: "https://example.com/sns.rss"
+  #   source_name: "Example SNS"
+  #   source_type: "sns"
+  #   lang: "ja"
+
