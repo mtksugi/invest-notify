@@ -16,7 +16,12 @@ class ValidationResult:
     errors: list[str]
 
 
-def validate_notifications(obj: dict[str, Any]) -> ValidationResult:
+def validate_notifications(
+    obj: dict[str, Any],
+    *,
+    max_confirmed: int = 3,
+    max_early_warning: int = 3,
+) -> ValidationResult:
     errors: list[str] = []
     if not isinstance(obj, dict):
         return ValidationResult(False, ["root must be object"])
@@ -85,10 +90,10 @@ def validate_notifications(obj: dict[str, Any]) -> ValidationResult:
                 if not ok_any:
                     errors.append(f"notifications[{i}] category {category} requires evidence from news/ir")
 
-    if lane_counts["confirmed"] > 3:
-        errors.append("confirmed lane exceeds 3")
-    if lane_counts["early_warning"] > 3:
-        errors.append("early_warning lane exceeds 3")
+    if lane_counts["confirmed"] > int(max_confirmed):
+        errors.append(f"confirmed lane exceeds {int(max_confirmed)}")
+    if lane_counts["early_warning"] > int(max_early_warning):
+        errors.append(f"early_warning lane exceeds {int(max_early_warning)}")
 
     return ValidationResult(ok=(len(errors) == 0), errors=errors)
 

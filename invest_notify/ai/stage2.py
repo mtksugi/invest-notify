@@ -15,6 +15,8 @@ def run_stage2(
     out_path: str | Path,
     chunk_size: int = 25,
     auto_fix_summary: bool = True,
+    max_confirmed: int = 3,
+    max_early_warning: int = 3,
 ) -> dict[str, Any]:
     stage1 = json.loads(Path(stage1_path).read_text(encoding="utf-8"))
     if not isinstance(stage1, dict):
@@ -35,14 +37,20 @@ def run_stage2(
         compact = _compact_events(chunk)
         payload = json.dumps({"generated_at": stage1.get("generated_at"), "events": compact}, ensure_ascii=False)
         print(f"[stage2] chunk {i+1}/{total_chunks} events={len(chunk)}", flush=True)
-        resp_part = chat_json(cfg=cfg, system=STAGE2_SYSTEM, user=stage2_user(payload), temperature=None, max_tokens=8000)
+        resp_part = chat_json(
+            cfg=cfg,
+            system=STAGE2_SYSTEM,
+            user=stage2_user(payload, max_confirmed=max_confirmed, max_early_warning=max_early_warning),
+            temperature=None,
+            max_tokens=8000,
+        )
         _basic_stage2_validate(resp_part)
         part = resp_part.get("notifications", [])
         if isinstance(part, list):
             all_notifs.extend([n for n in part if isinstance(n, dict)])
 
     # 集約後に lane ごとに confidence 上位3件に絞る
-    merged = _cap_notifications(all_notifs)
+    merged = _cap_notifications(all_notifs, max_confirmed=max_confirmed, max_early_warning=max_early_warning)
     if auto_fix_summary:
         # summaryの文字数制約（300〜600）を満たすまで補正する（MVPの安定化）
         merged = _fix_summaries(cfg, merged)
@@ -101,7 +109,12 @@ def _compact_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _cap_notifications(notifs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _cap_notifications(
+    notifs: list[dict[str, Any]],
+    *,
+    max_confirmed: int,
+    max_early_warning: int,
+) -> list[dict[str, Any]]:
     def conf(n: dict[str, Any]) -> float:
         v = n.get("confidence")
         try:
@@ -111,8 +124,8 @@ def _cap_notifications(notifs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     confirmed = [n for n in notifs if n.get("lane") == "confirmed"]
     early = [n for n in notifs if n.get("lane") == "early_warning"]
-    confirmed = sorted(confirmed, key=conf, reverse=True)[:3]
-    early = sorted(early, key=conf, reverse=True)[:3]
+    confirmed = sorted(confirmed, key=conf, reverse=True)[: max(0, int(max_confirmed))]
+    early = sorted(early, key=conf, reverse=True)[: max(0, int(max_early_warning))]
 
     # 重複キー（ticker:category）は先勝ち
     seen: set[str] = set()

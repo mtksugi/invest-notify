@@ -82,6 +82,8 @@ python -m invest_notify run --config config.yaml
 - `--out`（任意, デフォルト `data/notifications.json`）: 出力パス
 - `--chunk-size`（任意, デフォルト `25`）: 第1段イベントを分割して第2段にかけるサイズ
 - `--no-auto-fix-summary`（任意）: summaryの300〜600字を満たすための自動補正を無効化
+- `--max-confirmed`（任意, デフォルト `3`）: 確度高（confirmed）の最大件数（試用期間の増量に使う）
+- `--max-early-warning`（任意, デフォルト `3`）: 早期警戒（early_warning）の最大件数（試用期間の増量に使う）
 
 #### `email`
 - `--notifications`（任意, デフォルト `data/notifications.json`）: 通知JSON

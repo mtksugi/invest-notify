@@ -45,6 +45,8 @@ def main() -> int:
     p_s2.add_argument("--out", default="data/notifications.json")
     p_s2.add_argument("--chunk-size", type=int, default=25)
     p_s2.add_argument("--no-auto-fix-summary", action="store_true")
+    p_s2.add_argument("--max-confirmed", type=int, default=3)
+    p_s2.add_argument("--max-early-warning", type=int, default=3)
 
     p_email = sp.add_parser("email", help="render email from notifications (with 3-day dedupe)")
     p_email.add_argument("--notifications", default="data/notifications.json")
@@ -91,8 +93,10 @@ def main() -> int:
             out_path=Path(args.out),
             chunk_size=args.chunk_size,
             auto_fix_summary=(not args.no_auto_fix_summary),
+            max_confirmed=args.max_confirmed,
+            max_early_warning=args.max_early_warning,
         )
-        vr = validate_notifications(out)
+        vr = validate_notifications(out, max_confirmed=args.max_confirmed, max_early_warning=args.max_early_warning)
         if not vr.ok:
             print("Validation errors:")
             for e in vr.errors:
