@@ -75,8 +75,14 @@ rss_feeds:
     lang: "en"
 
   # --- sns ---
-  # - url: "https://example.com/sns.rss"
-  #   source_name: "Example SNS"
+  # Reddit（SNS代替）
+  # NOTE:
+  # - Redditは公式API無しでもRSSが取れる（MVP向き）
+  # - ノイズを増やしやすいので、まずは1〜2個だけ有効化推奨
+  # - RSSの形式: https://www.reddit.com/r/{subreddit}/new/.rss
+  #
+  # - url: "https://www.reddit.com/r/geopolitics/new/.rss"
+  #   source_name: "Reddit r/geopolitics (new)"
   #   source_type: "sns"
-  #   lang: "ja"
+  #   lang: "en"
 

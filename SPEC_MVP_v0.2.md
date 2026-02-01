@@ -88,7 +88,7 @@
 ---
 
 ### 6. 通知コンテンツ要件（メール）
-各イベントは **300〜600字**を目安に、必ず以下を含む（欠けたら棄却）。
+各イベントは **300〜600字**に収め、必ず以下を含む（欠けたら棄却）。
 
 - **イベント概要**（300〜600字の本文）
 - **銘柄別の影響（必須）**：対象tickerごとに、影響方向（positive/negative/mixed/unclear）と理由
@@ -146,8 +146,7 @@
           "url": "https://example.com/article",
           "source_type": "news",
           "title": "記事タイトル",
-          "published_at": "2026-01-23T01:23:45Z",
-          "excerpt": "抜粋..."
+          "published_at": "2026-01-23T01:23:45Z"
         }
       ],
       "why_it_matters_hypothesis": ["任意：波及仮説"],
