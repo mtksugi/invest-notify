@@ -43,6 +43,7 @@ OpenAI互換APIを利用します（環境変数で指定）。
 - `OPENAI_MAX_RETRIES`（任意。デフォルト: `2`）
 
 `.env` がプロジェクト直下にある場合は、起動時に自動ロードします（既に環境変数がある場合はそちら優先）。
+テンプレートは `.env.example`。
 
 ```bash
 # 第1段：イベント化
@@ -56,6 +57,24 @@ python -m invest_notify email --notifications data/notifications.json --out data
 ```
 
 ワンショット（収集→第1段→第2段→メール本文）：
+
+```bash
+python -m invest_notify run --config config.yaml
+```
+
+### SMTP送信（AWS SES）
+必要な環境変数（`.env.example` 参照）：
+- `SES_SMTP_HOST` / `SES_SMTP_PORT` / `SES_SMTP_USER` / `SES_SMTP_PASS`
+- `MAIL_FROM`（SESで検証済みドメイン配下のFrom）
+- `MAIL_TO`（宛先。複数ならカンマ区切り）
+
+送信（notifications.json から重複抑制→送信→成功後state更新）：
+
+```bash
+python -m invest_notify send --notifications data/notifications.json
+```
+
+ワンショットで送信まで：
 
 ```bash
 python -m invest_notify run --config config.yaml
@@ -91,9 +110,17 @@ python -m invest_notify run --config config.yaml
 - `--out`（任意, デフォルト `data/email.txt`）: メール本文出力先
 - `--window-days`（任意, デフォルト `3`）: 重複抑制日数
 
+#### `send`
+- `--notifications`（任意, デフォルト `data/notifications.json`）: 通知JSON
+- `--state`（任意, デフォルト `data/state/sent_events.json`）: 3日重複抑制の状態ファイル（送信成功後に更新）
+- `--out`（任意, デフォルト `data/email.txt`）: 生成した本文も保存する
+- `--window-days`（任意, デフォルト `3`）: 重複抑制日数
+- `--dry-run`（任意）: 送信せず、stateも更新しない（動作確認用）
+
 #### `run`
 - `--config`（必須）: YAML設定
 - `--lookback-hours`（任意, デフォルト `24`）
 - `--per-collector-limit`（任意, デフォルト `500`）
 - `--state`（任意, デフォルト `data/state/sent_events.json`）
+- `--dry-run`（任意）: 送信せず、stateも更新しない
 

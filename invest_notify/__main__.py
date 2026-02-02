@@ -10,6 +10,7 @@ from .validate import validate_notifications
 from .ai.openai_compat import load_openai_compat_config_from_env
 from .ai.stage1 import run_stage1
 from .ai.stage2 import run_stage2
+from .smtp_send import load_smtp_config_from_env, send_text_email
 
 
 def main() -> int:
@@ -54,11 +55,19 @@ def main() -> int:
     p_email.add_argument("--out", default="data/email.txt")
     p_email.add_argument("--window-days", type=int, default=3)
 
+    p_send = sp.add_parser("send", help="send email via SMTP (SES) and update state on success")
+    p_send.add_argument("--notifications", default="data/notifications.json")
+    p_send.add_argument("--state", default="data/state/sent_events.json")
+    p_send.add_argument("--out", default="data/email.txt", help="also write rendered email body here")
+    p_send.add_argument("--window-days", type=int, default=3)
+    p_send.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
+
     p_run = sp.add_parser("run", help="collect -> stage1 -> stage2 -> email (one-shot)")
     p_run.add_argument("--config", required=True)
     p_run.add_argument("--lookback-hours", type=int, default=24)
     p_run.add_argument("--per-collector-limit", type=int, default=500)
     p_run.add_argument("--state", default="data/state/sent_events.json")
+    p_run.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
 
     args = p.parse_args()
 
@@ -121,10 +130,37 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(body, encoding="utf-8")
         print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {args.out}")
+        return 0
 
-        # state更新（送信した前提で更新。送信実装を入れたらsend成功後に更新する）
+    if args.cmd == "send":
+        import json
+
+        obj = json.loads(Path(args.notifications).read_text(encoding="utf-8"))
+        notifs = obj.get("notifications", []) if isinstance(obj, dict) else []
+        if not isinstance(notifs, list):
+            raise RuntimeError("notifications.json must contain notifications[]")
+
+        state_path = Path(args.state)
+        state = load_state(state_path)
+        allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
+
+        subject, body = render_email(allowed)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body, encoding="utf-8")
+
+        if args.dry_run:
+            print(f"[dry-run] Would send email ({len(allowed)} items, suppressed {len(suppressed)})")
+            print(f"Wrote email body -> {args.out}")
+            return 0
+
+        smtp_cfg = load_smtp_config_from_env()
+        send_text_email(cfg=smtp_cfg, subject=subject, body=body)
+        print(f"Sent email ({len(allowed)} items, suppressed {len(suppressed)})")
+
+        # 送信成功後のみstate更新
         new_state = update_state_with_sent(state, allowed)
-        save_state(Path(args.state), new_state)
+        save_state(state_path, new_state)
         return 0
 
     if args.cmd == "run":
@@ -155,14 +191,23 @@ def main() -> int:
         print(f"Wrote notifications -> {stage2_path}")
 
         notifs = out.get("notifications", [])
-        state = load_state(Path(args.state))
+        state_path = Path(args.state)
+        state = load_state(state_path)
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=3)
         subject, body = render_email(allowed)
         email_path.write_text(body, encoding="utf-8")
         print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {email_path}")
 
+        if args.dry_run:
+            print("[dry-run] Not sending, not updating state")
+            return 0
+
+        smtp_cfg = load_smtp_config_from_env()
+        send_text_email(cfg=smtp_cfg, subject=subject, body=body)
+        print("Sent email")
+
         new_state = update_state_with_sent(state, allowed)
-        save_state(Path(args.state), new_state)
+        save_state(state_path, new_state)
         return 0
 
     raise RuntimeError("unknown command")
