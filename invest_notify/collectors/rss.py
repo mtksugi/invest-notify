@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import os
 from typing import Any
 
 import certifi
@@ -149,12 +150,17 @@ def _fetch_feed(url: str) -> bytes | None:
     requests + certifi で確実に取得してから feedparser.parse(bytes) に渡す。
     """
     try:
+        contact = os.environ.get("INVEST_NOTIFY_UA_CONTACT", "").strip()
+        if not contact:
+            # SECは連絡先付きのUser-Agentを要求することがあるため、最低限の形を用意する（MVP）
+            contact = "invest-notify@example.com"
+        ua = f"invest_notify/0.1 (personal use; contact: {contact})"
         r = requests.get(
             url,
             timeout=20,
             allow_redirects=True,
             # SECなどはUser-Agentを厳格に見ることがあるので、用途を明示する（MVP）
-            headers={"User-Agent": "invest_notify/0.1 (personal use; rss collector)"},
+            headers={"User-Agent": ua},
             verify=certifi.where(),
         )
         r.raise_for_status()

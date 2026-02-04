@@ -118,6 +118,12 @@ def main() -> int:
         import json
 
         obj = json.loads(Path(args.notifications).read_text(encoding="utf-8"))
+        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999)
+        if not vr.ok:
+            print("Validation errors:")
+            for e in vr.errors:
+                print(" -", e)
+            return 2
         notifs = obj.get("notifications", []) if isinstance(obj, dict) else []
         if not isinstance(notifs, list):
             raise RuntimeError("notifications.json must contain notifications[]")
@@ -136,6 +142,12 @@ def main() -> int:
         import json
 
         obj = json.loads(Path(args.notifications).read_text(encoding="utf-8"))
+        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999)
+        if not vr.ok:
+            print("Validation errors:")
+            for e in vr.errors:
+                print(" -", e)
+            return 2
         notifs = obj.get("notifications", []) if isinstance(obj, dict) else []
         if not isinstance(notifs, list):
             raise RuntimeError("notifications.json must contain notifications[]")
