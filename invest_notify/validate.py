@@ -78,7 +78,12 @@ def validate_notifications(
             # プロンプトでは300〜600字を厳守させるが、実運用では僅差の短文を許容する。
             # 例: 297字のような誤差で全体が止まるのを避ける（MVPの安定性優先）。
             if slen < 270 or slen > 600:
-                errors.append(f"notifications[{i}].summary must be 270..600 chars (got {slen})")
+                # stage2側で2回修正しても収まらない場合は、運用優先で通す
+                # （ただし極端に短い/長い場合は品質/暴走の観点で弾く）
+                if n.get("summary_len_waived") is True and (120 <= slen <= 2000):
+                    pass
+                else:
+                    errors.append(f"notifications[{i}].summary must be 270..600 chars (got {slen})")
 
         for k in ("why_not_priced_in", "unknowns", "next_checks", "source_types", "evidence"):
             v = n.get(k)

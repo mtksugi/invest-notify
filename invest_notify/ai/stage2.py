@@ -579,6 +579,11 @@ def _fix_summaries(cfg: OpenAICompatConfig, notifs: list[dict[str, Any]]) -> lis
             n2["summary"] = new_summary
             fixed.append(n2)
         else:
-            fixed.append(n)
+            # 2回修正しても規定文字数に収まらない場合は、
+            # 「短すぎ/長すぎ」を理由にパイプライン全体を止めない（運用安定性優先）。
+            # validate側でこのフラグがある場合は、summary長の違反を許容する。
+            n2 = dict(n)
+            n2["summary_len_waived"] = True
+            fixed.append(n2)
     return fixed
 

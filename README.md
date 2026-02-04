@@ -134,3 +134,4 @@ python -m invest_notify run --config config.yaml
 - [x] メールをhtml形式にしたい
 - [x] tickerにyahoo financeのリンクがほしい
 - [x] 注視したいティッカーENVに登録 -> そのティッカーのニュースで重要そうなものも通知に含める
+- [ ] 異常終了時の監視（B案（堅牢）: invest_notify run に --healthcheck-url（成功時ping）と --alert-to（例外時メール）を追加する）
