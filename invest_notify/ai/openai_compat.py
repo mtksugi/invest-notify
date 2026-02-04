@@ -84,7 +84,47 @@ def chat_json(
 
             if r.status_code >= 400:
                 # このpayloadは相性が悪いので次へ（詳細は最後のエラーに残す）
-                last_err = f"{r.status_code} {r.text[:300]}"
+                #
+                # ただし OpenAI/互換実装では、モデルにより token 上限パラメータ名が異なる。
+                # - max_tokens が拒否される場合 -> max_completion_tokens に切替
+                # - max_completion_tokens が拒否される場合 -> max_tokens に切替
+                #
+                # 生成済みpayloadの総当りはしているが、上流が 400 を返す順序/条件により
+                # 「最後に試した」ものがエラーとして見えてしまい、復旧できないことがあるため、
+                # この 2 パターンだけはその場で切替して即時再試行する。
+                text = r.text or ""
+                last_err = f"{r.status_code} {text[:300]}"
+                if r.status_code == 400:
+                    swapped: dict[str, Any] | None = None
+                    if ("max_tokens" in p) and ("max_completion_tokens" not in p) and (
+                        "max_tokens" in text and "max_completion_tokens" in text
+                    ):
+                        swapped = dict(p)
+                        swapped.pop("max_tokens", None)
+                        swapped["max_completion_tokens"] = max_tokens
+                    elif ("max_completion_tokens" in p) and ("max_tokens" not in p) and (
+                        "max_completion_tokens" in text and "max_tokens" in text
+                    ):
+                        swapped = dict(p)
+                        swapped.pop("max_completion_tokens", None)
+                        swapped["max_tokens"] = max_tokens
+
+                    if swapped is not None:
+                        try:
+                            r2 = requests.post(url, headers=headers, json=swapped, timeout=cfg.timeout_seconds)
+                            if r2.status_code < 400:
+                                data2 = r2.json()
+                                content2, meta2 = _extract_assistant_content_and_meta(data2)
+                                if content2.strip():
+                                    return _parse_json_lenient(content2)
+                                last_err = (
+                                    f"empty content after param swap "
+                                    f"(finish_reason={meta2.get('finish_reason')}, refusal={meta2.get('refusal')})"
+                                )
+                            else:
+                                last_err = f"{r2.status_code} { (r2.text or '')[:300] }"
+                        except requests.exceptions.RequestException as e:
+                            last_err = f"request error after param swap: {e}"
                 break
 
             data = r.json()
