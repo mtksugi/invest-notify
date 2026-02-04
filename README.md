@@ -42,6 +42,8 @@ OpenAI互換APIを利用します（環境変数で指定）。
 - `OPENAI_TIMEOUT_SECONDS`（任意。デフォルト: `180`）
 - `OPENAI_MAX_RETRIES`（任意。デフォルト: `2`）
 - `INVEST_NOTIFY_UA_CONTACT`（任意。SECなどがUser-Agentに連絡先を要求する場合のメールアドレス）
+- `INVEST_NOTIFY_WATCH_TICKERS`（任意。注視ティッカー。カンマ区切り。例: `AAPL,MSFT,7203.T`）
+- `INVEST_NOTIFY_WATCH_MAX`（任意。注視ティッカーの別枠（追加枠）上限。デフォルト: 注視ティッカーがあれば `3`）
 
 `.env` がプロジェクト直下にある場合は、起動時に自動ロードします（既に環境変数がある場合はそちら優先）。
 テンプレートは `.env.example`。
@@ -129,6 +131,6 @@ python -m invest_notify run --config config.yaml
 
 ### TODO
 
-- [ ] メールをhtml形式にしたい
-- [ ] tickerにyahoo financeのリンクがほしい
-- [ ] 注視したいティッカーの登録機能
+- [x] メールをhtml形式にしたい
+- [x] tickerにyahoo financeのリンクがほしい
+- [x] 注視したいティッカーENVに登録 -> そのティッカーのニュースで重要そうなものも通知に含める

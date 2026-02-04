@@ -82,3 +82,34 @@ def send_text_email(*, cfg: SmtpConfig, subject: str, body: str) -> None:
         s.login(cfg.username, cfg.password)
         s.send_message(msg)
 
+
+def send_email(*, cfg: SmtpConfig, subject: str, text_body: str, html_body: str | None = None) -> None:
+    """
+    text/plain + text/html の multipart/alternative を送る。
+    html_body が None の場合はテキストのみ。
+    """
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = cfg.mail_from
+    msg["To"] = ", ".join(cfg.mail_to)
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    # SES推奨: 587 + STARTTLS（または 465 SMTPS）
+    if cfg.port == 465:
+        with smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=30) as s:
+            s.login(cfg.username, cfg.password)
+            s.send_message(msg)
+        return
+
+    with smtplib.SMTP(cfg.host, cfg.port, timeout=30) as s:
+        s.ehlo()
+        try:
+            s.starttls()
+            s.ehlo()
+        except smtplib.SMTPException:
+            pass
+        s.login(cfg.username, cfg.password)
+        s.send_message(msg)
+

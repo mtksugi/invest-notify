@@ -17,6 +17,8 @@ def run_stage2(
     auto_fix_summary: bool = True,
     max_confirmed: int = 3,
     max_early_warning: int = 3,
+    watch_tickers: list[str] | None = None,
+    max_watch: int = 0,
 ) -> dict[str, Any]:
     stage1 = json.loads(Path(stage1_path).read_text(encoding="utf-8"))
     if not isinstance(stage1, dict):
@@ -40,7 +42,13 @@ def run_stage2(
         resp_part = chat_json(
             cfg=cfg,
             system=STAGE2_SYSTEM,
-            user=stage2_user(payload, max_confirmed=max_confirmed, max_early_warning=max_early_warning),
+            user=stage2_user(
+                payload,
+                max_confirmed=max_confirmed,
+                max_early_warning=max_early_warning,
+                watch_tickers=watch_tickers,
+                max_watch=max_watch,
+            ),
             temperature=None,
             max_tokens=8000,
         )
@@ -54,7 +62,13 @@ def run_stage2(
     all_notifs = _postprocess_llm_notifications(all_notifs, frag_text_by_url=frag_text_by_url)
 
     # 集約後に lane ごとに confidence 上位3件に絞る
-    merged = _cap_notifications(all_notifs, max_confirmed=max_confirmed, max_early_warning=max_early_warning)
+    merged = _cap_notifications(
+        all_notifs,
+        max_confirmed=max_confirmed,
+        max_early_warning=max_early_warning,
+        watch_tickers=watch_tickers,
+        max_watch=max_watch,
+    )
     if auto_fix_summary:
         # summaryの文字数制約（300〜600）を満たすまで補正する（MVPの安定化）
         merged = _fix_summaries(cfg, merged)
@@ -445,7 +459,11 @@ def _cap_notifications(
     *,
     max_confirmed: int,
     max_early_warning: int,
+    watch_tickers: list[str] | None = None,
+    max_watch: int = 0,
 ) -> list[dict[str, Any]]:
+    watch = {str(x).strip().upper() for x in (watch_tickers or []) if isinstance(x, str) and x.strip()}
+
     def conf(n: dict[str, Any]) -> float:
         v = n.get("confidence")
         try:
@@ -453,15 +471,21 @@ def _cap_notifications(
         except Exception:
             return 0.0
 
-    confirmed = [n for n in notifs if n.get("lane") == "confirmed"]
-    early = [n for n in notifs if n.get("lane") == "early_warning"]
-    confirmed = sorted(confirmed, key=conf, reverse=True)[: max(0, int(max_confirmed))]
-    early = sorted(early, key=conf, reverse=True)[: max(0, int(max_early_warning))]
+    def is_watch(n: dict[str, Any]) -> int:
+        t = str(n.get("ticker") or "").strip().upper()
+        return 1 if (t and t in watch) else 0
+
+    confirmed_all = [n for n in notifs if n.get("lane") == "confirmed"]
+    early_all = [n for n in notifs if n.get("lane") == "early_warning"]
+
+    # 通常枠（仕様の上限）は watch で歪めない。純粋に confidence 上位を採用する。
+    confirmed_main = sorted(confirmed_all, key=conf, reverse=True)[: max(0, int(max_confirmed))]
+    early_main = sorted(early_all, key=conf, reverse=True)[: max(0, int(max_early_warning))]
 
     # 重複キー（ticker:category）は先勝ち
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
-    for n in confirmed + early:
+    for n in confirmed_main + early_main:
         t = str(n.get("ticker") or "").strip()
         c = str(n.get("category") or "").strip()
         k = f"{t}:{c}"
@@ -469,6 +493,42 @@ def _cap_notifications(
             continue
         seen.add(k)
         out.append(n)
+
+    # 注視ティッカーは「別枠」として追加で最大N件まで載せる（強制枠ではない）
+    # - 既に通常枠で採用されている event_id は重複して載せない
+    # - 重要度（confidence）が高いものから
+    max_watch = max(0, int(max_watch))
+    if watch and max_watch > 0:
+        remaining_watch = []
+        for n in confirmed_all + early_all:
+            if not isinstance(n, dict):
+                continue
+            if not is_watch(n):
+                continue
+            t = str(n.get("ticker") or "").strip()
+            c = str(n.get("category") or "").strip()
+            if not t or not c:
+                continue
+            k = f"{t}:{c}"
+            if k in seen:
+                continue
+            remaining_watch.append(n)
+
+        def lane_rank(n: dict[str, Any]) -> int:
+            # 同程度なら confirmed を前に
+            return 1 if n.get("lane") == "confirmed" else 0
+
+        remaining_watch = sorted(remaining_watch, key=lambda n: (lane_rank(n), conf(n)), reverse=True)[:max_watch]
+        for n in remaining_watch:
+            t = str(n.get("ticker") or "").strip()
+            c = str(n.get("category") or "").strip()
+            k = f"{t}:{c}"
+            if k in seen:
+                continue
+            seen.add(k)
+            n2 = dict(n)
+            n2["bucket"] = "watch"  # validate/emailで「別枠」として扱う
+            out.append(n2)
     return out
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .collect import collect_fragments, write_fragments_json
@@ -10,7 +11,31 @@ from .validate import validate_notifications
 from .ai.openai_compat import load_openai_compat_config_from_env
 from .ai.stage1 import run_stage1
 from .ai.stage2 import run_stage2
-from .smtp_send import load_smtp_config_from_env, send_text_email
+from .smtp_send import load_smtp_config_from_env, send_email
+
+
+def _load_watch_tickers_from_env() -> list[str]:
+    raw = os.environ.get("INVEST_NOTIFY_WATCH_TICKERS", "").strip()
+    if not raw:
+        return []
+    xs = [x.strip() for x in raw.split(",") if x.strip()]
+    # 爆発防止（誤設定で巨大になっても影響を抑える）
+    return xs[:200]
+
+
+def _load_watch_max_from_env(*, watch_tickers: list[str]) -> int:
+    """
+    注視ティッカーの別枠（追加枠）上限。
+    - ENVがあればそれを採用
+    - 無ければ watch_tickers がある場合はデフォルト3、無ければ0
+    """
+    raw = os.environ.get("INVEST_NOTIFY_WATCH_MAX", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except Exception:
+            return 0
+    return 3 if watch_tickers else 0
 
 
 def main() -> int:
@@ -70,6 +95,8 @@ def main() -> int:
     p_run.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
 
     args = p.parse_args()
+    watch_tickers = _load_watch_tickers_from_env()
+    watch_max = _load_watch_max_from_env(watch_tickers=watch_tickers)
 
     if args.cmd == "collect":
         fragments = collect_fragments(
@@ -90,6 +117,7 @@ def main() -> int:
             max_fragments=args.max_fragments,
             chunk_size=args.chunk_size,
             max_text_chars_per_fragment=args.max_text_chars,
+            watch_tickers=watch_tickers,
         )
         print(f"Wrote stage1 events -> {args.out}")
         return 0
@@ -104,8 +132,15 @@ def main() -> int:
             auto_fix_summary=(not args.no_auto_fix_summary),
             max_confirmed=args.max_confirmed,
             max_early_warning=args.max_early_warning,
+            watch_tickers=watch_tickers,
+            max_watch=watch_max,
         )
-        vr = validate_notifications(out, max_confirmed=args.max_confirmed, max_early_warning=args.max_early_warning)
+        vr = validate_notifications(
+            out,
+            max_confirmed=args.max_confirmed,
+            max_early_warning=args.max_early_warning,
+            max_watch=watch_max,
+        )
         if not vr.ok:
             print("Validation errors:")
             for e in vr.errors:
@@ -118,7 +153,7 @@ def main() -> int:
         import json
 
         obj = json.loads(Path(args.notifications).read_text(encoding="utf-8"))
-        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999)
+        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999, max_watch=999)
         if not vr.ok:
             print("Validation errors:")
             for e in vr.errors:
@@ -131,10 +166,13 @@ def main() -> int:
         state = load_state(Path(args.state))
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
-        subject, body = render_email(allowed)
+        subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(body, encoding="utf-8")
+        out.write_text(text_body, encoding="utf-8")
+        # HTMLも同時に出力（確認/デバッグ用）
+        out_html = out.with_suffix(out.suffix + ".html") if out.suffix else Path(str(out) + ".html")
+        out_html.write_text(html_body, encoding="utf-8")
         print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {args.out}")
         return 0
 
@@ -142,7 +180,7 @@ def main() -> int:
         import json
 
         obj = json.loads(Path(args.notifications).read_text(encoding="utf-8"))
-        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999)
+        vr = validate_notifications(obj, max_confirmed=999, max_early_warning=999, max_watch=999)
         if not vr.ok:
             print("Validation errors:")
             for e in vr.errors:
@@ -156,10 +194,12 @@ def main() -> int:
         state = load_state(state_path)
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
-        subject, body = render_email(allowed)
+        subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(body, encoding="utf-8")
+        out.write_text(text_body, encoding="utf-8")
+        out_html = out.with_suffix(out.suffix + ".html") if out.suffix else Path(str(out) + ".html")
+        out_html.write_text(html_body, encoding="utf-8")
 
         if args.dry_run:
             print(f"[dry-run] Would send email ({len(allowed)} items, suppressed {len(suppressed)})")
@@ -167,7 +207,7 @@ def main() -> int:
             return 0
 
         smtp_cfg = load_smtp_config_from_env()
-        send_text_email(cfg=smtp_cfg, subject=subject, body=body)
+        send_email(cfg=smtp_cfg, subject=subject, text_body=text_body, html_body=html_body)
         print(f"Sent email ({len(allowed)} items, suppressed {len(suppressed)})")
 
         # 送信成功後のみstate更新
@@ -190,11 +230,17 @@ def main() -> int:
         write_fragments_json(fragments=fragments, out_path=fragments_path)
         print(f"Wrote {len(fragments)} fragments -> {fragments_path}")
 
-        run_stage1(cfg=cfg_llm, fragments_path=fragments_path, out_path=stage1_path)
+        run_stage1(cfg=cfg_llm, fragments_path=fragments_path, out_path=stage1_path, watch_tickers=watch_tickers)
         print(f"Wrote stage1 events -> {stage1_path}")
 
-        out = run_stage2(cfg=cfg_llm, stage1_path=stage1_path, out_path=stage2_path)
-        vr = validate_notifications(out)
+        out = run_stage2(
+            cfg=cfg_llm,
+            stage1_path=stage1_path,
+            out_path=stage2_path,
+            watch_tickers=watch_tickers,
+            max_watch=watch_max,
+        )
+        vr = validate_notifications(out, max_watch=watch_max)
         if not vr.ok:
             print("Validation errors:")
             for e in vr.errors:
@@ -206,8 +252,9 @@ def main() -> int:
         state_path = Path(args.state)
         state = load_state(state_path)
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=3)
-        subject, body = render_email(allowed)
-        email_path.write_text(body, encoding="utf-8")
+        subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
+        email_path.write_text(text_body, encoding="utf-8")
+        email_path.with_suffix(email_path.suffix + ".html").write_text(html_body, encoding="utf-8")
         print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {email_path}")
 
         if args.dry_run:
@@ -215,7 +262,7 @@ def main() -> int:
             return 0
 
         smtp_cfg = load_smtp_config_from_env()
-        send_text_email(cfg=smtp_cfg, subject=subject, body=body)
+        send_email(cfg=smtp_cfg, subject=subject, text_body=text_body, html_body=html_body)
         print("Sent email")
 
         new_state = update_state_with_sent(state, allowed)

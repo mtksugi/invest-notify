@@ -21,6 +21,7 @@ def validate_notifications(
     *,
     max_confirmed: int = 3,
     max_early_warning: int = 3,
+    max_watch: int = 0,
 ) -> ValidationResult:
     errors: list[str] = []
     if not isinstance(obj, dict):
@@ -29,19 +30,29 @@ def validate_notifications(
     if not isinstance(notifs, list):
         return ValidationResult(False, ["notifications must be array"])
 
-    # lane count
+    # lane count（通常枠のみ）。bucket=="watch" は別枠として数えない。
     lane_counts = {"confirmed": 0, "early_warning": 0}
+    watch_count = 0
 
     for i, n in enumerate(notifs):
         if not isinstance(n, dict):
             errors.append(f"notifications[{i}] must be object")
             continue
 
+        bucket = n.get("bucket")
+        if bucket is not None and bucket not in ("watch",):
+            errors.append(f"notifications[{i}].bucket invalid")
+
+        is_watch_bucket = bucket == "watch"
+        if is_watch_bucket:
+            watch_count += 1
+
         lane = n.get("lane")
         if lane not in ("confirmed", "early_warning"):
             errors.append(f"notifications[{i}].lane invalid")
         else:
-            lane_counts[lane] += 1
+            if not is_watch_bucket:
+                lane_counts[lane] += 1
 
         ticker = (n.get("ticker") or "").strip()
         if not ticker:
@@ -96,6 +107,8 @@ def validate_notifications(
         errors.append(f"confirmed lane exceeds {int(max_confirmed)}")
     if lane_counts["early_warning"] > int(max_early_warning):
         errors.append(f"early_warning lane exceeds {int(max_early_warning)}")
+    if watch_count > int(max_watch):
+        errors.append(f"watch bucket exceeds {int(max_watch)}")
 
     return ValidationResult(ok=(len(errors) == 0), errors=errors)
 

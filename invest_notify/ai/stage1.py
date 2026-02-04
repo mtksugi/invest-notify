@@ -18,6 +18,7 @@ def run_stage1(
     max_fragments: int = 200,
     max_text_chars_per_fragment: int = 400,
     chunk_size: int = 10,
+    watch_tickers: list[str] | None = None,
 ) -> dict[str, Any]:
     fragments = json.loads(Path(fragments_path).read_text(encoding="utf-8"))
     if not isinstance(fragments, list):
@@ -27,6 +28,7 @@ def run_stage1(
         fragments,
         max_items=max_fragments,
         max_text_chars=max_text_chars_per_fragment,
+        watch_tickers=watch_tickers,
     )
     # 200件まとめて投げるとモデル/回線によってタイムアウトしやすいので、分割してイベント化してマージする（MVP）。
     events_all: list[dict[str, Any]] = []
@@ -70,9 +72,68 @@ def _renumber_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _compact_fragments(fragments: list[dict], *, max_items: int, max_text_chars: int) -> list[dict]:
+def _compact_fragments(
+    fragments: list[dict], *, max_items: int, max_text_chars: int, watch_tickers: list[str] | None
+) -> list[dict]:
+    return _compact_fragments_with_watchlist(
+        fragments,
+        max_items=max_items,
+        max_text_chars=max_text_chars,
+        watch_tickers=watch_tickers,
+    )
+
+
+def _compact_fragments_with_watchlist(
+    fragments: list[dict], *, max_items: int, max_text_chars: int, watch_tickers: list[str] | None
+) -> list[dict]:
+    import re
+
+    watch = [t.strip() for t in (watch_tickers or []) if isinstance(t, str) and t.strip()]
+
+    def _matches_watch(*, hay: str) -> bool:
+        if not watch or not hay:
+            return False
+        h = hay.upper()
+        for t in watch:
+            u = t.upper()
+            # 2〜3文字のティッカーは誤検知しやすいので厳しめに（$TICKER / (TICKER) を優先）
+            alnum_len = len(re.sub(r"[^A-Z0-9]", "", u))
+            if alnum_len <= 3:
+                pats = [
+                    rf"\${re.escape(u)}\b",
+                    rf"\({re.escape(u)}\)",
+                    rf"\bticker\s*[:=]\s*{re.escape(u)}\b",
+                ]
+            else:
+                pats = [
+                    rf"\b{re.escape(u)}\b",
+                    rf"\${re.escape(u)}\b",
+                    rf"\({re.escape(u)}\)",
+                    rf"\bticker\s*[:=]\s*{re.escape(u)}\b",
+                ]
+            if any(re.search(p, h) for p in pats):
+                return True
+        return False
+
+    # watchにヒットする断片を先に入れて、上限200件の中で取りこぼしを減らす
+    prioritized: list[dict] = []
+    rest: list[dict] = []
+    for f in fragments:
+        if not isinstance(f, dict):
+            continue
+        hay = " ".join(
+            [
+                str(f.get("title") or ""),
+                str(f.get("text") or ""),
+                str(f.get("url") or ""),
+            ]
+        )
+        (prioritized if _matches_watch(hay=hay) else rest).append(f)
+
+    ordered = prioritized + rest
+
     out: list[dict] = []
-    for f in fragments[: max(0, int(max_items))]:
+    for f in ordered[: max(0, int(max_items))]:
         if not isinstance(f, dict):
             continue
         text = str(f.get("text", "") or "")
