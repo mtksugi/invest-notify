@@ -35,6 +35,39 @@ def load_openai_compat_config_from_env() -> OpenAICompatConfig:
     )
 
 
+def load_openai_compat_config_from_env_for_stage(*, stage: str | None) -> OpenAICompatConfig:
+    """
+    Stageごとにモデルを切り替えたい用途のヘルパー。
+    - stage="stage1" -> OPENAI_MODEL_STAGE1 を優先し、無ければ OPENAI_MODEL
+    - stage="stage2" -> OPENAI_MODEL_STAGE2 を優先し、無ければ OPENAI_MODEL
+    - stageがNone/不明 -> OPENAI_MODEL
+    """
+    stage_norm = (stage or "").strip().lower()
+    if stage_norm in ("stage1", "s1"):
+        key = "OPENAI_MODEL_STAGE1"
+    elif stage_norm in ("stage2", "s2"):
+        key = "OPENAI_MODEL_STAGE2"
+    else:
+        key = ""
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required")
+
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1"
+    stage_model = os.environ.get(key, "").strip() if key else ""
+    model = stage_model or os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+    timeout = int(os.environ.get("OPENAI_TIMEOUT_SECONDS", "180"))
+    retries = int(os.environ.get("OPENAI_MAX_RETRIES", "2"))
+    return OpenAICompatConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout_seconds=timeout,
+        max_retries=retries,
+    )
+
+
 def chat_json(
     *,
     cfg: OpenAICompatConfig,

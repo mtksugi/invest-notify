@@ -38,6 +38,8 @@ OpenAI互換APIを利用します（環境変数で指定）。
 必要な環境変数：
 - `OPENAI_API_KEY`（必須）
 - `OPENAI_MODEL`（任意。デフォルト: `gpt-4o-mini`）
+- `OPENAI_MODEL_STAGE1`（任意。第1段だけモデルを上書き。無ければ `OPENAI_MODEL`）
+- `OPENAI_MODEL_STAGE2`（任意。第2段だけモデルを上書き。無ければ `OPENAI_MODEL`）
 - `OPENAI_BASE_URL`（任意。OpenAI以外の互換エンドポイントを使う場合）
 - `OPENAI_TIMEOUT_SECONDS`（任意。デフォルト: `180`）
 - `OPENAI_MAX_RETRIES`（任意。デフォルト: `2`）

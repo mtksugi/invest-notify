@@ -8,7 +8,7 @@ from .collect import collect_fragments, write_fragments_json
 from .email_render import render_email
 from .state import filter_recently_sent, load_state, save_state, update_state_with_sent
 from .validate import validate_notifications
-from .ai.openai_compat import load_openai_compat_config_from_env
+from .ai.openai_compat import load_openai_compat_config_from_env_for_stage
 from .ai.stage1 import run_stage1
 from .ai.stage2 import run_stage2
 from .smtp_send import load_smtp_config_from_env, send_email
@@ -109,7 +109,7 @@ def main() -> int:
         return 0
 
     if args.cmd == "stage1":
-        cfg = load_openai_compat_config_from_env()
+        cfg = load_openai_compat_config_from_env_for_stage(stage="stage1")
         run_stage1(
             cfg=cfg,
             fragments_path=Path(args.fragments),
@@ -123,7 +123,7 @@ def main() -> int:
         return 0
 
     if args.cmd == "stage2":
-        cfg = load_openai_compat_config_from_env()
+        cfg = load_openai_compat_config_from_env_for_stage(stage="stage2")
         out = run_stage2(
             cfg=cfg,
             stage1_path=Path(args.stage1),
@@ -216,7 +216,8 @@ def main() -> int:
         return 0
 
     if args.cmd == "run":
-        cfg_llm = load_openai_compat_config_from_env()
+        cfg_stage1 = load_openai_compat_config_from_env_for_stage(stage="stage1")
+        cfg_stage2 = load_openai_compat_config_from_env_for_stage(stage="stage2")
         fragments_path = Path("data/fragments.json")
         stage1_path = Path("data/stage1_events.json")
         stage2_path = Path("data/notifications.json")
@@ -230,11 +231,11 @@ def main() -> int:
         write_fragments_json(fragments=fragments, out_path=fragments_path)
         print(f"Wrote {len(fragments)} fragments -> {fragments_path}")
 
-        run_stage1(cfg=cfg_llm, fragments_path=fragments_path, out_path=stage1_path, watch_tickers=watch_tickers)
+        run_stage1(cfg=cfg_stage1, fragments_path=fragments_path, out_path=stage1_path, watch_tickers=watch_tickers)
         print(f"Wrote stage1 events -> {stage1_path}")
 
         out = run_stage2(
-            cfg=cfg_llm,
+            cfg=cfg_stage2,
             stage1_path=stage1_path,
             out_path=stage2_path,
             watch_tickers=watch_tickers,
