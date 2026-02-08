@@ -131,17 +131,17 @@ python -m invest_notify run --config config.yaml
 
 ### 注視ティッカーのRSS強化（任意）
 
-`INVEST_NOTIFY_WATCH_TICKERS` に指定した銘柄の情報をより確実に拾いたい場合、`config.yaml` に MarketWatch の銘柄別RSSを追加できます。
+`INVEST_NOTIFY_WATCH_TICKERS` に指定した銘柄の情報をより確実に拾いたい場合、`config.yaml` に Yahoo Finance の銘柄別RSSを追加できます。
 
 ```
 # config.yaml の rss_feeds に追加
-- url: "https://feeds.content.dowjones.io/public/rss/mw_quote/AAPL"
-  source_name: "MarketWatch AAPL"
+- url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US"
+  source_name: "Yahoo Finance AAPL"
   source_type: "news"
   lang: "en"
 ```
 
-書式: `https://feeds.content.dowjones.io/public/rss/mw_quote/{TICKER}`
+書式: `https://feeds.finance.yahoo.com/rss/2.0/headline?s={TICKER}&region=US&lang=en-US`
 
 注視ティッカー数が多い場合はすべて追加すると `per_type_max.news` を圧迫するため、特に重要な銘柄のみ追加することを推奨します。
 
