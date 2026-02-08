@@ -129,6 +129,22 @@ python -m invest_notify run --config config.yaml
 - `--state`（任意, デフォルト `data/state/sent_events.json`）
 - `--dry-run`（任意）: 送信せず、stateも更新しない
 
+### 注視ティッカーのRSS強化（任意）
+
+`INVEST_NOTIFY_WATCH_TICKERS` に指定した銘柄の情報をより確実に拾いたい場合、`config.yaml` に MarketWatch の銘柄別RSSを追加できます。
+
+```
+# config.yaml の rss_feeds に追加
+- url: "https://feeds.content.dowjones.io/public/rss/mw_quote/AAPL"
+  source_name: "MarketWatch AAPL"
+  source_type: "news"
+  lang: "en"
+```
+
+書式: `https://feeds.content.dowjones.io/public/rss/mw_quote/{TICKER}`
+
+注視ティッカー数が多い場合はすべて追加すると `per_type_max.news` を圧迫するため、特に重要な銘柄のみ追加することを推奨します。
+
 ---
 
 ### TODO

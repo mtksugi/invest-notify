@@ -339,6 +339,67 @@ def _postprocess_llm_notifications(
         "rights of security holders",
     ]
 
+    # --- A-3: 「具体ゼロ IR」検知 ---
+    _VAGUE_KEYWORDS = [
+        "不明", "未確定", "未特定", "条件次第", "判断しにくい", "判断できない",
+        "織り込み切れ", "見えない", "読めない", "分からない",
+        "unclear", "unknown", "not yet determined", "depends on",
+        "cannot determine", "insufficient",
+    ]
+
+    def _is_vague_ir(n: dict[str, Any]) -> bool:
+        """IR で、summaryが曖昧 かつ evidence が SEC index のみ → ノイズと見なす"""
+        if n.get("category") != "ir":
+            return False
+        summary = str(n.get("summary") or "")
+        vague_count = sum(1 for kw in _VAGUE_KEYWORDS if kw in summary)
+        if vague_count < 3:
+            return False
+        evidence = n.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            return True  # evidence なし → vague
+        # evidence が全て SEC index ページのみ（本文を読めていない）
+        if all(
+            ("sec.gov" in str(e.get("url", "")) and "index.htm" in str(e.get("url", "")))
+            for e in evidence
+            if isinstance(e, dict)
+        ):
+            return True
+        return False
+
+    # --- B-2: 日本株 IR キーワード判定 ---
+    _JP_IR_ALLOW_KEYWORDS = [
+        # 資本政策
+        "自社株買い", "自己株式", "buyback", "share repurchase",
+        "増配", "減配", "配当", "dividend",
+        "増資", "公募増資", "第三者割当", "株式分割",
+        # ガバナンス/経営
+        "社長交代", "新社長", "代表取締役", "ceo",
+        # 事業構造
+        "売却", "事業譲渡", "asset sale", "divestiture",
+        # 不正/会計
+        "架空取引", "不正", "粉飾", "fraud", "restatement",
+        # 業績修正
+        "下方修正", "上方修正", "業績修正", "guidance",
+    ]
+
+    def _is_jp_ir_allowed(n: dict[str, Any]) -> bool:
+        """日本株 (.T) + category=ir + news起点 → キーワードで許可判定"""
+        t = str(n.get("ticker") or "")
+        if not t.endswith(".T"):
+            return False
+        if n.get("category") != "ir":
+            return False
+        # news 起点であること（8-K由来ではない）
+        if "news" not in (n.get("source_types") or []):
+            return False
+        # summary + evidence title からキーワード検索
+        text_for_check = str(n.get("summary") or "").lower()
+        for e in (n.get("evidence") or [])[:5]:
+            if isinstance(e, dict):
+                text_for_check += " " + str(e.get("title") or "").lower()
+        return any(kw.lower() in text_for_check for kw in _JP_IR_ALLOW_KEYWORDS)
+
     def _set_lane(n: dict[str, Any], lane: str) -> dict[str, Any]:
         n2 = dict(n)
         n2["lane"] = lane
@@ -367,9 +428,32 @@ def _postprocess_llm_notifications(
                 n = dict(n)
                 n["lane"] = "early_warning"
 
+        # --- B-1: lawsuit は IR とは別ルートで処理 ---
+        if cat == "lawsuit":
+            if not ticker:
+                continue  # ticker 不明は棄却（仕様通り）
+            # lawsuit はLLMの判定を基本尊重。ticker が付いていれば通す。
+            out.append(n)
+            continue
+
         if cat != "ir":
             out.append(n)
             continue
+
+        # --- ここから IR 固有の処理 ---
+
+        # B-2: 日本株のニュース起点 IR はキーワードで許可判定（8-K Item 番号が無いため）
+        if _is_jp_ir_allowed(n):
+            # 日本株 IR は原則 early_warning（confirmed は具体数字があるもののみ）
+            if n.get("lane") == "confirmed":
+                n = _set_lane(n, "early_warning")
+            out.append(n)
+            continue
+
+        # A-3: 具体ゼロ IR（summaryが曖昧 + SEC index のみ）は棄却
+        if _is_vague_ir(n):
+            continue
+
         t = _text(n)
         items = _items_mentioned(t)
 
@@ -412,7 +496,16 @@ def _postprocess_llm_notifications(
         # それ以外のIRは落とす（超低ノイズ優先）
         continue
 
-    return out
+    # --- A-2 最終パス: impact_direction=unclear は confirmed にしない ---
+    # （IR固有のlane上書きの後に適用する必要がある）
+    final: list[dict[str, Any]] = []
+    for n in out:
+        if n.get("impact_direction") == "unclear" and n.get("lane") == "confirmed":
+            n = dict(n)
+            n["lane"] = "early_warning"
+        final.append(n)
+
+    return final
 
 
 def _compact_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
