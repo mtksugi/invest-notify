@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +183,13 @@ def _postprocess_llm_notifications(
             v = n.get(k)
             if isinstance(v, str):
                 parts.append(v)
+        ev = n.get("evidence")
+        if isinstance(ev, list):
+            for e in ev[:5]:
+                if isinstance(e, dict):
+                    title = e.get("title")
+                    if isinstance(title, str) and title:
+                        parts.append(title)
         for k in ("why_not_priced_in", "unknowns", "next_checks"):
             v = n.get(k)
             if isinstance(v, list):
@@ -196,6 +204,64 @@ def _postprocess_llm_notifications(
                         if isinstance(u, str) and u in frag_text_by_url:
                             parts.append(frag_text_by_url[u])
         return "\n".join(parts).lower()
+
+    def _has_concrete_financial_terms(t: str) -> bool:
+        concrete_patterns = [
+            r"\$\s?\d",
+            r"\d+\s?(million|billion|m|bn)\b",
+            r"\d+\s?%",
+            r"\d+\s?(億|万|千)\b",
+        ]
+        if any(re.search(p, t, flags=re.IGNORECASE) for p in concrete_patterns):
+            return True
+        concrete_keywords = [
+            "対価",
+            "金額",
+            "価格",
+            "発行株数",
+            "希薄化",
+            "担保",
+            "コベナンツ",
+            "利率",
+            "満期",
+            "期限",
+            "発行価格",
+            "割引率",
+            "交換比率",
+            "premium",
+            "consideration",
+            "purchase price",
+            "discount",
+            "dilution",
+            "principal amount",
+            "interest rate",
+            "maturity",
+            "collateral",
+            "covenant",
+            "exchange ratio",
+            "counterparty",
+            "milestone",
+            "royalty",
+        ]
+        return any(kw in t for kw in concrete_keywords)
+
+    def _is_commentary_noise(n: dict[str, Any], t: str) -> bool:
+        if n.get("category") != "business_B2":
+            return False
+        if _has_primary_ir_evidence(n):
+            return False
+        commentary_markers = [
+            "fairly priced",
+            "worth buying",
+            "analysts see",
+            "smart money",
+            "valuation",
+            "why optical plays are hot",
+            "why this stock",
+            "why the stock",
+            "is still fairly priced",
+        ]
+        return any(m in t for m in commentary_markers)
 
     def _items_mentioned(t: str) -> set[str]:
         """
@@ -248,6 +314,35 @@ def _postprocess_llm_notifications(
         "officer",
         "resign",
         "appointment",
+    ]
+
+    auditor_risk_keywords = [
+        "意見不一致",
+        "非依拠",
+        "再表示",
+        "訂正",
+        "継続企業",
+        "不正",
+        "material weakness",
+        "disagreement",
+        "non-reliance",
+        "restatement",
+        "going concern",
+        "fraud",
+    ]
+
+    listing_risk_keywords = [
+        "上場廃止",
+        "上場維持",
+        "猶予",
+        "最低株価",
+        "noncompliance",
+        "deficiency",
+        "minimum bid",
+        "listing",
+        "reverse stock split",
+        "nasdaq",
+        "nyse",
     ]
 
     # IRとして残すためのキーワード（Item表記が無い場合の保険）
@@ -367,6 +462,26 @@ def _postprocess_llm_notifications(
             return True
         return False
 
+    def _is_thin_ir(n: dict[str, Any], t: str, items: set[str]) -> bool:
+        if n.get("category") != "ir":
+            return False
+
+        # Reg FD / Material agreement などの見出しだけで、経済実体の具体がない8-Kは落とす。
+        if items and items.issubset(transaction_items | noise_only_items):
+            if not _has_concrete_financial_terms(t):
+                return True
+
+        # 監査人変更単体は、意見不一致・restatement 等がなければ原則ノイズ。
+        if ("4.01" in items) and not (items & {"4.02"}):
+            if not any(kw in t for kw in auditor_risk_keywords):
+                return True
+
+        # 上場維持関連も、具体的な違反・期限・是正策が見えないものは落とす。
+        if ("3.01" in items) and not any(kw in t for kw in listing_risk_keywords):
+            return True
+
+        return False
+
     # --- B-2: 日本株 IR キーワード判定 ---
     _JP_IR_ALLOW_KEYWORDS = [
         # 資本政策
@@ -419,6 +534,12 @@ def _postprocess_llm_notifications(
         if ticker and _is_index_ticker(ticker):
             continue
 
+        t = _text(n)
+
+        # 解説/バリュエーション系の business_B2 を落とす
+        if _is_commentary_noise(n, t):
+            continue
+
         # business_B2 の confirmed は厳格化：
         # - 一次ソース(ir)が無い
         # - かつ news が単一ドメインしか無い
@@ -454,8 +575,11 @@ def _postprocess_llm_notifications(
         if _is_vague_ir(n):
             continue
 
-        t = _text(n)
         items = _items_mentioned(t)
+
+        # 項目名はあるが、経済実体が薄い IR は落とす
+        if _is_thin_ir(n, t, items):
+            continue
 
         # Reg FD / exhibits だけの8-Kは落とす（芽になりにくい）
         if items and items.issubset(noise_only_items):
@@ -487,6 +611,8 @@ def _postprocess_llm_notifications(
 
         # 取引系はbusiness_B2へ寄せる（ただし曖昧なら落とす）
         if (items & transaction_items) and any(k.lower() in t for k in transaction_keywords):
+            if not _has_concrete_financial_terms(t):
+                continue
             n2 = dict(n)
             n2["category"] = "business_B2"
             # 取引系は通常 “確定” に近いが、内容が薄いことも多いので lane は維持（LLMに委ねる）
@@ -540,6 +666,9 @@ def _compact_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "candidate_tickers": e.get("candidate_tickers", []),
                 "source_types": e.get("source_types", []),
                 "evidence": ev2,
+                "why_it_matters_hypothesis": e.get("why_it_matters_hypothesis", [])[:3]
+                if isinstance(e.get("why_it_matters_hypothesis"), list)
+                else [],
                 "what_changed": e.get("what_changed"),
                 "open_questions": e.get("open_questions", [])[:3] if isinstance(e.get("open_questions"), list) else [],
             }
