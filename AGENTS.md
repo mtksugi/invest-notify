@@ -36,3 +36,8 @@ See `README.md` for full CLI reference. Key commands:
 - The `collect` subcommand works without any API keys — it only fetches public RSS feeds.
 - The `data/` directory is auto-created by the CLI; do not check it in.
 - `.env` is auto-loaded by `python-dotenv` at startup; existing env vars take precedence.
+- `stage1` is the slowest step: ~30-60s per chunk, with ~17 chunks for 170 fragments (total ~10-20 min). Plan accordingly.
+- `stage2` is faster (~20s per chunk, ~5 chunks). `email` is near-instant.
+- After `email`, both `data/email.txt` (plain text) and `data/email.txt.html` (HTML) are generated.
+- To verify the pipeline end-to-end without SMTP, run each step separately: `collect` → `stage1` → `stage2` → `email`. The `run` subcommand does all steps but also attempts `send` if SES credentials are set.
+- `config.yaml` and `.env` must be created from their `.example` counterparts before running. They are gitignored and not committed.
