@@ -778,12 +778,17 @@ def _cap_notifications(
             r"すでに",
             r"既に",
             r"急騰",
+            r"急伸",
+            r"上昇済み",
             r"上昇している",
             r"上昇を受け",
             r"株価.*上昇",
+            r"織り込み済み",
             r"already",
             r"rall(y|ied)",
             r"surged?",
+            r"spiked?",
+            r"jumped?",
             r"priced in",
         ]
         return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
@@ -826,7 +831,20 @@ def _cap_notifications(
             "revise",
             "contract",
             "契約",
+            "締結",
+            "発効",
+            "開始",
+            "着手",
+            "量産",
+            "稼働",
             "agreement",
+            "commence",
+            "launch",
+            "effective",
+            "signed",
+            "start of production",
+            "mass production",
+            "capacity expansion",
             "規制",
             "regulation",
             "supply",
@@ -910,6 +928,16 @@ def _cap_notifications(
     def _sort_key(n: dict[str, Any]) -> tuple[float, float, int]:
         return (_priority_score(n), conf(n), _lane_rank(n))
 
+    def _category_cap(category: str) -> int:
+        """
+        日次で特定カテゴリに偏りすぎないようにするための上限。
+        - geopolitics は後追い化しやすいため通常枠では最大1件に抑える
+        - 他カテゴリは実質無制限（枠上限はlane制約で管理）
+        """
+        if category == "geopolitics":
+            return 1
+        return 9999
+
     # 同一キー（ticker:category）はスコアが高いものを残す
     best_by_key: dict[str, dict[str, Any]] = {}
     for n in notifs:
@@ -933,7 +961,9 @@ def _cap_notifications(
     early_main = sorted(early_all, key=_sort_key, reverse=True)[: max(0, int(max_early_warning))]
 
     # 重複キー（ticker:category）は先勝ち
+    # かつカテゴリ偏りを抑える（geopoliticsの過多抑制）
     seen: set[str] = set()
+    cat_count: dict[str, int] = {}
     out: list[dict[str, Any]] = []
     for n in confirmed_main + early_main:
         t = str(n.get("ticker") or "").strip()
@@ -941,7 +971,11 @@ def _cap_notifications(
         k = f"{t}:{c}"
         if k in seen:
             continue
+        cur = cat_count.get(c, 0)
+        if cur >= _category_cap(c):
+            continue
         seen.add(k)
+        cat_count[c] = cur + 1
         out.append(n)
 
     # 注視ティッカーは「別枠」として追加で最大N件まで載せる（強制枠ではない）
@@ -971,7 +1005,11 @@ def _cap_notifications(
             k = f"{t}:{c}"
             if k in seen:
                 continue
+            cur = cat_count.get(c, 0)
+            if cur >= _category_cap(c):
+                continue
             seen.add(k)
+            cat_count[c] = cur + 1
             n2 = dict(n)
             n2["bucket"] = "watch"  # validate/emailで「別枠」として扱う
             out.append(n2)

@@ -166,6 +166,10 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
     baseline_late = 0
     reranked_total = 0
     reranked_late = 0
+    old_cat: Counter[str] = Counter()
+    new_cat: Counter[str] = Counter()
+    old_cat_late: Counter[str] = Counter()
+    new_cat_late: Counter[str] = Counter()
     for _, day_notifs in by_day_notifs.items():
         # 旧相当: laneごとにconfidence順（dedupeあり）
         def _conf(n: dict[str, Any]) -> float:
@@ -192,9 +196,21 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             max_watch=0,
         )
         baseline_total += len(old_pick)
-        baseline_late += sum(1 for n in old_pick if any(r.search(_notif_text(n)) for r in compiled))
         reranked_total += len(new_pick)
-        reranked_late += sum(1 for n in new_pick if any(r.search(_notif_text(n)) for r in compiled))
+        for n in old_pick:
+            cat = str(n.get("category") or "")
+            old_cat[cat] += 1
+            is_late_old = any(r.search(_notif_text(n)) for r in compiled)
+            if is_late_old:
+                baseline_late += 1
+                old_cat_late[cat] += 1
+        for n in new_pick:
+            cat = str(n.get("category") or "")
+            new_cat[cat] += 1
+            is_late_new = any(r.search(_notif_text(n)) for r in compiled)
+            if is_late_new:
+                reranked_late += 1
+                new_cat_late[cat] += 1
 
     total = len(rows)
     days = len(by_day)
@@ -219,6 +235,12 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             ),
             "late_ratio_old_rank_proxy": (baseline_late / baseline_total if baseline_total else 0.0),
             "late_ratio_new_rank_proxy": (reranked_late / reranked_total if reranked_total else 0.0),
+        },
+        "category_mix_compare": {
+            "old_rank_category_counts": dict(old_cat),
+            "new_rank_category_counts": dict(new_cat),
+            "old_rank_late_by_category": dict(old_cat_late),
+            "new_rank_late_by_category": dict(new_cat_late),
         },
         "late_breakdown": {
             "by_category": dict(Counter(str(r.get("category") or "") for _, r in rows if any(c.search(_notif_text(r)) for c in compiled))),

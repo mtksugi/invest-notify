@@ -130,8 +130,8 @@ python -m invest_notify run --config config.yaml
 - `--dry-run`（任意）: 送信せず、stateも更新しない
 
 #### `review-history`
-- `--history-root`（任意, デフォルト `data/history`）: 日次履歴ディレクトリ（`YYYY-MM-DD/notifications.json` を含む）
-- `--out`（任意）: 集計JSONの保存先（未指定なら標準出力のみ）
+- `--history-dir`（必須）: 日次履歴ディレクトリ（`YYYY-MM-DD/notifications.json` を含む）
+- `--out`（任意, デフォルト `data/history_review.json`）: 集計JSONの保存先
 
 履歴から「通知の質」を振り返るための集計です。  
 `notifications.json` を読み、以下を出力します：
@@ -139,6 +139,9 @@ python -m invest_notify run --config config.yaml
 - lane/category/impact_direction ごとの内訳
 - 「後追い（already/rally/急騰/上昇を受け 等）」になりやすい文言の出現率
 - 「構造要因（guidance/契約/規制/供給/希薄化/自社株買い 等）」文言の出現率
+- 証拠鮮度（event/generation時刻とevidence時刻差）の中央値
+- 旧ランク（confidence順）と新ランク（priority順）の後追い比率比較
+- 旧/新ランクで採択されるカテゴリ構成（件数）と後追い内訳の比較
 
 ```bash
 python -m invest_notify review-history --history-dir data/history_input/history --out data/history_review.json
