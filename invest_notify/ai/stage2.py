@@ -263,6 +263,25 @@ def _postprocess_llm_notifications(
         ]
         return any(m in t for m in commentary_markers)
 
+    def _is_late_move_reaction_text(t: str) -> bool:
+        """
+        既に値動きが出た後追い説明になっているシグナルを検知する。
+        初動捕捉を優先するため、後段で減点/棄却に使う。
+        """
+        patterns = [
+            r"すでに",
+            r"既に",
+            r"急騰",
+            r"株価.*上昇",
+            r"上昇を受け",
+            r"上昇している",
+            r"already",
+            r"rall(y|ied)",
+            r"surged?",
+            r"priced in",
+        ]
+        return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+
     def _items_mentioned(t: str) -> set[str]:
         """
         8-Kの Item x.xx をざっくり抽出する（完全一致でなくてOK）。
@@ -540,6 +559,19 @@ def _postprocess_llm_notifications(
         if _is_commentary_noise(n, t):
             continue
 
+        # 後追い説明になっているものは初動捕捉を阻害しやすいので抑制する。
+        # - geopolitics: 後追いの反復通知になりやすいため棄却
+        # - business_B2: 具体条件が薄いなら棄却、そうでなければconfirmed→early_warningに降格
+        if _is_late_move_reaction_text(t):
+            if cat == "geopolitics":
+                continue
+            if cat == "business_B2":
+                if not _has_concrete_financial_terms(t):
+                    continue
+                if n.get("lane") == "confirmed":
+                    n = dict(n)
+                    n["lane"] = "early_warning"
+
         # business_B2 の confirmed は厳格化：
         # - 一次ソース(ir)が無い
         # - かつ news が単一ドメインしか無い
@@ -697,12 +729,126 @@ def _cap_notifications(
         t = str(n.get("ticker") or "").strip().upper()
         return 1 if (t and t in watch) else 0
 
-    confirmed_all = [n for n in notifs if n.get("lane") == "confirmed"]
-    early_all = [n for n in notifs if n.get("lane") == "early_warning"]
+    def _joined_text(n: dict[str, Any]) -> str:
+        parts: list[str] = [str(n.get("summary") or "")]
+        ev = n.get("evidence")
+        if isinstance(ev, list):
+            for e in ev[:5]:
+                if isinstance(e, dict):
+                    parts.append(str(e.get("title") or ""))
+        return "\n".join(parts).lower()
 
-    # 通常枠（仕様の上限）は watch で歪めない。純粋に confidence 上位を採用する。
-    confirmed_main = sorted(confirmed_all, key=conf, reverse=True)[: max(0, int(max_confirmed))]
-    early_main = sorted(early_all, key=conf, reverse=True)[: max(0, int(max_early_warning))]
+    def _has_late_reaction_markers(n: dict[str, Any]) -> bool:
+        t = _joined_text(n)
+        patterns = [
+            r"すでに",
+            r"既に",
+            r"急騰",
+            r"上昇している",
+            r"上昇を受け",
+            r"株価.*上昇",
+            r"already",
+            r"rall(y|ied)",
+            r"surged?",
+            r"priced in",
+        ]
+        return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+
+    def _has_structure_markers(n: dict[str, Any]) -> bool:
+        t = _joined_text(n)
+        markers = [
+            "guidance",
+            "ガイダンス",
+            "修正",
+            "revise",
+            "contract",
+            "契約",
+            "agreement",
+            "規制",
+            "regulation",
+            "supply",
+            "供給",
+            "dilution",
+            "希薄化",
+            "buyback",
+            "自社株買い",
+        ]
+        return any(m.lower() in t for m in markers)
+
+    def _priority_score(n: dict[str, Any]) -> float:
+        """
+        初動を拾いやすくするための簡易スコア。
+        - 既存の confidence を土台にしつつ、構造変化を示す要素を加点
+        - 後追い（既に動いた後）らしい記述は減点
+        """
+        score = conf(n)
+        cat = str(n.get("category") or "").strip()
+        impact = str(n.get("impact_direction") or "").strip()
+        source_types = n.get("source_types")
+        if impact == "positive":
+            score += 0.08
+        elif impact == "mixed":
+            score += 0.03
+        elif impact in ("negative", "unclear"):
+            score -= 0.05
+
+        if cat in ("business_B2", "ir"):
+            score += 0.05
+        elif cat == "geopolitics":
+            score -= 0.04
+
+        if n.get("lane") == "early_warning" and impact in ("positive", "mixed"):
+            score += 0.03
+
+        if isinstance(source_types, list):
+            uniq_st = {str(x) for x in source_types if isinstance(x, str) and x}
+            if len(uniq_st) >= 2:
+                score += 0.04
+            if "news" in uniq_st and "ir" in uniq_st:
+                score += 0.04
+
+        evidence = n.get("evidence")
+        if isinstance(evidence, list) and len(evidence) >= 2:
+            score += 0.02
+
+        if _has_structure_markers(n):
+            score += 0.03
+        if _has_late_reaction_markers(n):
+            score -= 0.15
+
+        # 注視銘柄は同点時に前に出しやすくする（通常枠を壊さない範囲）
+        if is_watch(n):
+            score += 0.02
+        return score
+
+    def _lane_rank(n: dict[str, Any]) -> int:
+        # 同程度なら confirmed を前に
+        return 1 if n.get("lane") == "confirmed" else 0
+
+    def _sort_key(n: dict[str, Any]) -> tuple[float, float, int]:
+        return (_priority_score(n), conf(n), _lane_rank(n))
+
+    # 同一キー（ticker:category）はスコアが高いものを残す
+    best_by_key: dict[str, dict[str, Any]] = {}
+    for n in notifs:
+        if not isinstance(n, dict):
+            continue
+        t = str(n.get("ticker") or "").strip()
+        c = str(n.get("category") or "").strip()
+        if not t or not c:
+            continue
+        k = f"{t}:{c}"
+        prev = best_by_key.get(k)
+        if prev is None or _sort_key(n) > _sort_key(prev):
+            best_by_key[k] = n
+    merged_notifs = list(best_by_key.values())
+
+    confirmed_all = [n for n in merged_notifs if n.get("lane") == "confirmed"]
+    early_all = [n for n in merged_notifs if n.get("lane") == "early_warning"]
+
+    # 通常枠は priority_score の高い順（同点は confidence）で採用する。
+    confirmed_main = sorted(confirmed_all, key=_sort_key, reverse=True)[: max(0, int(max_confirmed))]
+    early_main = sorted(early_all, key=_sort_key, reverse=True)[: max(0, int(max_early_warning))]
 
     # 重複キー（ticker:category）は先勝ち
     seen: set[str] = set()
@@ -736,11 +882,7 @@ def _cap_notifications(
                 continue
             remaining_watch.append(n)
 
-        def lane_rank(n: dict[str, Any]) -> int:
-            # 同程度なら confirmed を前に
-            return 1 if n.get("lane") == "confirmed" else 0
-
-        remaining_watch = sorted(remaining_watch, key=lambda n: (lane_rank(n), conf(n)), reverse=True)[:max_watch]
+        remaining_watch = sorted(remaining_watch, key=_sort_key, reverse=True)[:max_watch]
         for n in remaining_watch:
             t = str(n.get("ticker") or "").strip()
             c = str(n.get("category") or "").strip()

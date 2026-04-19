@@ -12,6 +12,7 @@ from .ai.openai_compat import load_openai_compat_config_from_env_for_stage
 from .ai.stage1 import run_stage1
 from .ai.stage2 import run_stage2
 from .smtp_send import load_smtp_config_from_env, send_email
+from .review_history import review_history
 
 
 def _load_watch_tickers_from_env() -> list[str]:
@@ -93,6 +94,10 @@ def main() -> int:
     p_run.add_argument("--per-collector-limit", type=int, default=500)
     p_run.add_argument("--state", default="data/state/sent_events.json")
     p_run.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
+
+    p_review = sp.add_parser("review-history", help="review historical notifications for early-rise capture")
+    p_review.add_argument("--history-dir", required=True, help="path to history root that contains YYYY-MM-DD dirs")
+    p_review.add_argument("--out", default="data/history_review.json", help="output JSON report path")
 
     args = p.parse_args()
     watch_tickers = _load_watch_tickers_from_env()
@@ -268,6 +273,20 @@ def main() -> int:
 
         new_state = update_state_with_sent(state, allowed)
         save_state(state_path, new_state)
+        return 0
+
+    if args.cmd == "review-history":
+        report = review_history(history_dir=Path(args.history_dir))
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        import json
+
+        out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"Wrote history review -> {out}")
+        print(
+            "late_reaction_ratio="
+            + str((report.get("late_reaction_count", 0) / max(1, report.get("total_notifications", 1))))
+        )
         return 0
 
     raise RuntimeError("unknown command")

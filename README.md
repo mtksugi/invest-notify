@@ -129,6 +129,21 @@ python -m invest_notify run --config config.yaml
 - `--state`（任意, デフォルト `data/state/sent_events.json`）
 - `--dry-run`（任意）: 送信せず、stateも更新しない
 
+#### `review-history`
+- `--history-root`（任意, デフォルト `data/history`）: 日次履歴ディレクトリ（`YYYY-MM-DD/notifications.json` を含む）
+- `--out`（任意）: 集計JSONの保存先（未指定なら標準出力のみ）
+
+履歴から「通知の質」を振り返るための集計です。  
+`notifications.json` を読み、以下を出力します：
+- 通知件数（総数/日次平均/日次中央値）
+- lane/category/impact_direction ごとの内訳
+- 「後追い（already/rally/急騰/上昇を受け 等）」になりやすい文言の出現率
+- 「構造要因（guidance/契約/規制/供給/希薄化/自社株買い 等）」文言の出現率
+
+```bash
+python -m invest_notify review-history --history-root data/history_input/history --out data/history_review.json
+```
+
 ### 注視ティッカーのRSS強化（任意）
 
 `INVEST_NOTIFY_WATCH_TICKERS` に指定した銘柄の情報をより確実に拾いたい場合、`config.yaml` に Yahoo Finance の銘柄別RSSを追加できます。
