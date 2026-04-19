@@ -220,6 +220,17 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             "late_ratio_old_rank_proxy": (baseline_late / baseline_total if baseline_total else 0.0),
             "late_ratio_new_rank_proxy": (reranked_late / reranked_total if reranked_total else 0.0),
         },
+        "late_breakdown": {
+            "by_category": dict(Counter(str(r.get("category") or "") for _, r in rows if any(c.search(_notif_text(r)) for c in compiled))),
+            "by_ticker_top10": [
+                {"ticker": t, "count": c}
+                for t, c in Counter(
+                    str(r.get("ticker") or "")
+                    for _, r in rows
+                    if any(c.search(_notif_text(r)) for c in compiled)
+                ).most_common(10)
+            ],
+        },
         "examples_late_reaction": examples_late,
     }
     return result

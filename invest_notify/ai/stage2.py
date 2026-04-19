@@ -788,6 +788,35 @@ def _cap_notifications(
         ]
         return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
 
+    def _is_oil_chase_geopolitics(n: dict[str, Any]) -> bool:
+        """
+        原油ショックの「価格急騰を受けた後追い説明」を検知。
+        初動捕捉の観点で、同内容が反復しやすいケースを優先度から下げる。
+        """
+        if str(n.get("category") or "").strip() != "geopolitics":
+            return False
+        t = _joined_text(n)
+        oil_words = [
+            "原油",
+            "wti",
+            "brent",
+            "ホルムズ",
+            "hormuz",
+            "iea",
+            "opec",
+            "リスクプレミアム",
+        ]
+        chase_words = [
+            "急騰",
+            "上昇を受け",
+            "100ドル超",
+            "priced in",
+            "already",
+            "rallied",
+            "surged",
+        ]
+        return any(w in t for w in oil_words) and any(w in t for w in chase_words)
+
     def _has_structure_markers(n: dict[str, Any]) -> bool:
         t = _joined_text(n)
         markers = [
@@ -849,6 +878,8 @@ def _cap_notifications(
             score += 0.03
         if _has_late_reaction_markers(n):
             score -= 0.15
+        if _is_oil_chase_geopolitics(n):
+            score -= 0.12
 
         # 初動検知の観点: 証拠の鮮度を加点/減点
         age_days = _evidence_freshness_days(n)
@@ -859,6 +890,13 @@ def _cap_notifications(
                 score += 0.02
             elif age_days >= 0.90:
                 score -= 0.03
+
+        # 地政学の confirmed は、明確な実体/新規性が弱い場合に後追い化しやすい。
+        if cat == "geopolitics" and n.get("lane") == "confirmed":
+            if impact in ("mixed", "unclear"):
+                score -= 0.04
+            if _has_late_reaction_markers(n):
+                score -= 0.06
 
         # 注視銘柄は同点時に前に出しやすくする（通常枠を壊さない範囲）
         if is_watch(n):
