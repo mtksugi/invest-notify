@@ -142,6 +142,7 @@ python -m invest_notify run --config config.yaml
 - 証拠鮮度（event/generation時刻とevidence時刻差）の中央値
 - 旧ランク（confidence順）と新ランク（priority順）の後追い比率比較
 - 旧/新ランクで採択されるカテゴリ構成（件数）と後追い内訳の比較
+- 旧/新ランクでのティッカー多様性比較（ユニーク銘柄数、上位銘柄集中度）
 
 ```bash
 python -m invest_notify review-history --history-dir data/history_input/history --out data/history_review.json

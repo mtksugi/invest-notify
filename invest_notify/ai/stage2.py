@@ -932,11 +932,35 @@ def _cap_notifications(
         """
         日次で特定カテゴリに偏りすぎないようにするための上限。
         - geopolitics は後追い化しやすいため通常枠では最大1件に抑える
+          （同一テーマ反復抑制も併用）
         - 他カテゴリは実質無制限（枠上限はlane制約で管理）
         """
         if category == "geopolitics":
             return 1
         return 9999
+
+    def _ticker_cap_main() -> int:
+        """
+        通常枠で同一ティッカーが連打されるのを抑える。
+        1日に同一tickerは原則1件まで（カテゴリ跨ぎの重複も抑制）。
+        """
+        return 1
+
+    def _geopolitics_theme(n: dict[str, Any]) -> str:
+        t = _joined_text(n)
+        if any(w in t for w in ("原油", "crude", "wti", "brent", "hormuz", "ホルムズ", "opec", "iea")):
+            return "oil-shock"
+        if any(w in t for w in ("関税", "tariff", "輸出規制", "export control", "sanction", "制裁")):
+            return "trade-restriction"
+        if any(w in t for w in ("停戦", "ceasefire", "ミサイル", "攻撃", "strike", "軍事")):
+            return "military-conflict"
+        return "geopolitics-other"
+
+    def _geo_theme_cap(theme: str) -> int:
+        # 原油ショックは同型イベントの反復通知が起きやすいので厳しめに抑制。
+        if theme == "oil-shock":
+            return 1
+        return 2
 
     # 同一キー（ticker:category）はスコアが高いものを残す
     best_by_key: dict[str, dict[str, Any]] = {}
@@ -961,9 +985,11 @@ def _cap_notifications(
     early_main = sorted(early_all, key=_sort_key, reverse=True)[: max(0, int(max_early_warning))]
 
     # 重複キー（ticker:category）は先勝ち
-    # かつカテゴリ偏りを抑える（geopoliticsの過多抑制）
+    # かつカテゴリ偏り/同一ticker過多/地政学テーマの反復を抑える
     seen: set[str] = set()
     cat_count: dict[str, int] = {}
+    ticker_count: dict[str, int] = {}
+    geo_theme_count: dict[str, int] = {}
     out: list[dict[str, Any]] = []
     for n in confirmed_main + early_main:
         t = str(n.get("ticker") or "").strip()
@@ -974,8 +1000,18 @@ def _cap_notifications(
         cur = cat_count.get(c, 0)
         if cur >= _category_cap(c):
             continue
+        if ticker_count.get(t, 0) >= _ticker_cap_main():
+            continue
+        if c == "geopolitics":
+            theme = _geopolitics_theme(n)
+            if geo_theme_count.get(theme, 0) >= _geo_theme_cap(theme):
+                continue
         seen.add(k)
         cat_count[c] = cur + 1
+        ticker_count[t] = ticker_count.get(t, 0) + 1
+        if c == "geopolitics":
+            theme = _geopolitics_theme(n)
+            geo_theme_count[theme] = geo_theme_count.get(theme, 0) + 1
         out.append(n)
 
     # 注視ティッカーは「別枠」として追加で最大N件まで載せる（強制枠ではない）
@@ -1008,6 +1044,8 @@ def _cap_notifications(
             cur = cat_count.get(c, 0)
             if cur >= _category_cap(c):
                 continue
+            # watch別枠はカテゴリ上限のみ適用し、ticker/theme多様性制約は外す
+            # （ユーザーの注視対象を優先して欠落させないため）
             seen.add(k)
             cat_count[c] = cur + 1
             n2 = dict(n)

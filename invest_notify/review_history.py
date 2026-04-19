@@ -170,6 +170,8 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
     new_cat: Counter[str] = Counter()
     old_cat_late: Counter[str] = Counter()
     new_cat_late: Counter[str] = Counter()
+    old_ticker: Counter[str] = Counter()
+    new_ticker: Counter[str] = Counter()
     for _, day_notifs in by_day_notifs.items():
         # 旧相当: laneごとにconfidence順（dedupeあり）
         def _conf(n: dict[str, Any]) -> float:
@@ -199,14 +201,20 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
         reranked_total += len(new_pick)
         for n in old_pick:
             cat = str(n.get("category") or "")
+            tk = str(n.get("ticker") or "")
             old_cat[cat] += 1
+            if tk:
+                old_ticker[tk] += 1
             is_late_old = any(r.search(_notif_text(n)) for r in compiled)
             if is_late_old:
                 baseline_late += 1
                 old_cat_late[cat] += 1
         for n in new_pick:
             cat = str(n.get("category") or "")
+            tk = str(n.get("ticker") or "")
             new_cat[cat] += 1
+            if tk:
+                new_ticker[tk] += 1
             is_late_new = any(r.search(_notif_text(n)) for r in compiled)
             if is_late_new:
                 reranked_late += 1
@@ -241,6 +249,18 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             "new_rank_category_counts": dict(new_cat),
             "old_rank_late_by_category": dict(old_cat_late),
             "new_rank_late_by_category": dict(new_cat_late),
+        },
+        "ticker_diversity_compare": {
+            "old_unique_tickers": len(old_ticker),
+            "new_unique_tickers": len(new_ticker),
+            "old_top_ticker_share": (
+                max(old_ticker.values()) / baseline_total if (old_ticker and baseline_total) else 0.0
+            ),
+            "new_top_ticker_share": (
+                max(new_ticker.values()) / reranked_total if (new_ticker and reranked_total) else 0.0
+            ),
+            "old_top_tickers": [{"ticker": t, "count": c} for t, c in old_ticker.most_common(10)],
+            "new_top_tickers": [{"ticker": t, "count": c} for t, c in new_ticker.most_common(10)],
         },
         "late_breakdown": {
             "by_category": dict(Counter(str(r.get("category") or "") for _, r in rows if any(c.search(_notif_text(r)) for c in compiled))),
