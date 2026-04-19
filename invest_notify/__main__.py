@@ -283,10 +283,14 @@ def main() -> int:
 
         out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote history review -> {out}")
-        print(
-            "late_reaction_ratio="
-            + str((report.get("late_reaction_count", 0) / max(1, report.get("total_notifications", 1))))
-        )
+        proxy = report.get("initial_move_capture_proxy", {})
+        ratio = 0.0
+        if isinstance(proxy, dict):
+            try:
+                ratio = float(proxy.get("late_reaction_ratio", 0.0))
+            except Exception:
+                ratio = 0.0
+        print("late_reaction_ratio=" + str(ratio))
         return 0
 
     raise RuntimeError("unknown command")

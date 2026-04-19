@@ -141,7 +141,7 @@ python -m invest_notify run --config config.yaml
 - 「構造要因（guidance/契約/規制/供給/希薄化/自社株買い 等）」文言の出現率
 
 ```bash
-python -m invest_notify review-history --history-root data/history_input/history --out data/history_review.json
+python -m invest_notify review-history --history-dir data/history_input/history --out data/history_review.json
 ```
 
 ### 注視ティッカーのRSS強化（任意）
