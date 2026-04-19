@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .ai.stage2 import _cap_notifications
 
 
 LATE_PATTERNS = [
@@ -69,6 +72,39 @@ def _notif_text(n: dict[str, Any]) -> str:
     return "\n".join(parts).lower()
 
 
+def _parse_iso_to_utc(s: Any) -> datetime | None:
+    if not isinstance(s, str) or not s.strip():
+        return None
+    ss = s.strip()
+    if ss.endswith("Z"):
+        ss = ss[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(ss)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _freshness_days_from_evidence(n: dict[str, Any]) -> float | None:
+    g = _parse_iso_to_utc(n.get("generated_at")) or _parse_iso_to_utc(n.get("event_time"))
+    ev = n.get("evidence")
+    if g is None or not isinstance(ev, list) or not ev:
+        return None
+    ages: list[float] = []
+    for e in ev:
+        if not isinstance(e, dict):
+            continue
+        p = _parse_iso_to_utc(e.get("published_at"))
+        if p is None:
+            continue
+        ages.append((g - p).total_seconds() / 86400.0)
+    if not ages:
+        return None
+    return min(ages)
+
+
 def review_history(history_dir: str | Path) -> dict[str, Any]:
     p = Path(history_dir)
     rows = _load_daily_notifications(p)
@@ -82,6 +118,10 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
     structure_like = 0
     early_positive_like = 0
     examples_late: list[dict[str, Any]] = []
+    age_days_all: list[float] = []
+    age_days_late: list[float] = []
+
+    by_day_notifs: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
 
     compiled = [re.compile(x, flags=re.IGNORECASE) for x in LATE_PATTERNS]
 
@@ -94,13 +134,19 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
         by_category[cat] += 1
         by_lane[lane] += 1
         by_impact[impact] += 1
+        by_day_notifs[day].append(n)
         if ticker:
             by_ticker[ticker] += 1
 
         text = _notif_text(n)
         is_late = any(r.search(text) for r in compiled)
+        age = _freshness_days_from_evidence(n)
+        if age is not None:
+            age_days_all.append(age)
         if is_late:
             late_like += 1
+            if age is not None:
+                age_days_late.append(age)
             if len(examples_late) < 10:
                 examples_late.append(
                     {
@@ -115,6 +161,40 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             structure_like += 1
         if lane == "early_warning" and impact in ("positive", "mixed"):
             early_positive_like += 1
+
+    baseline_total = 0
+    baseline_late = 0
+    reranked_total = 0
+    reranked_late = 0
+    for _, day_notifs in by_day_notifs.items():
+        # 旧相当: laneごとにconfidence順（dedupeあり）
+        def _conf(n: dict[str, Any]) -> float:
+            try:
+                return float(n.get("confidence") or 0.0)
+            except Exception:
+                return 0.0
+
+        confirmed = sorted([n for n in day_notifs if n.get("lane") == "confirmed"], key=_conf, reverse=True)[:3]
+        early = sorted([n for n in day_notifs if n.get("lane") == "early_warning"], key=_conf, reverse=True)[:3]
+        old_pick: list[dict[str, Any]] = []
+        seen_old: set[str] = set()
+        for n in confirmed + early:
+            k = f"{str(n.get('ticker') or '').strip()}:{str(n.get('category') or '').strip()}"
+            if not k or k in seen_old:
+                continue
+            seen_old.add(k)
+            old_pick.append(n)
+        new_pick = _cap_notifications(
+            day_notifs,
+            max_confirmed=3,
+            max_early_warning=3,
+            watch_tickers=None,
+            max_watch=0,
+        )
+        baseline_total += len(old_pick)
+        baseline_late += sum(1 for n in old_pick if any(r.search(_notif_text(n)) for r in compiled))
+        reranked_total += len(new_pick)
+        reranked_late += sum(1 for n in new_pick if any(r.search(_notif_text(n)) for r in compiled))
 
     total = len(rows)
     days = len(by_day)
@@ -131,6 +211,14 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
             "late_reaction_ratio": (late_like / total if total else 0.0),
             "structure_signal_ratio": (structure_like / total if total else 0.0),
             "early_positive_or_mixed_ratio": (early_positive_like / total if total else 0.0),
+            "evidence_freshness_days_median": (
+                sorted(age_days_all)[len(age_days_all) // 2] if age_days_all else None
+            ),
+            "evidence_freshness_days_median_late_only": (
+                sorted(age_days_late)[len(age_days_late) // 2] if age_days_late else None
+            ),
+            "late_ratio_old_rank_proxy": (baseline_late / baseline_total if baseline_total else 0.0),
+            "late_ratio_new_rank_proxy": (reranked_late / reranked_total if reranked_total else 0.0),
         },
         "examples_late_reaction": examples_late,
     }

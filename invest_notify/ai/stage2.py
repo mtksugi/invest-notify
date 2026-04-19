@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -738,6 +739,39 @@ def _cap_notifications(
                     parts.append(str(e.get("title") or ""))
         return "\n".join(parts).lower()
 
+    def _parse_iso_dt(s: Any) -> datetime | None:
+        if not isinstance(s, str) or not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _evidence_freshness_days(n: dict[str, Any]) -> float | None:
+        """
+        generated_at/event_time から最も新しい evidence までの経過日数（小さいほど新鮮）。
+        """
+        base_dt = _parse_iso_dt(n.get("generated_at")) or _parse_iso_dt(n.get("event_time"))
+        if base_dt is None:
+            return None
+        ev = n.get("evidence")
+        if not isinstance(ev, list):
+            return None
+        ages: list[float] = []
+        for e in ev[:8]:
+            if not isinstance(e, dict):
+                continue
+            p = _parse_iso_dt(e.get("published_at"))
+            if p is None:
+                continue
+            ages.append((base_dt - p).total_seconds() / 86400.0)
+        if not ages:
+            return None
+        return min(ages)
+
     def _has_late_reaction_markers(n: dict[str, Any]) -> bool:
         t = _joined_text(n)
         patterns = [
@@ -815,6 +849,16 @@ def _cap_notifications(
             score += 0.03
         if _has_late_reaction_markers(n):
             score -= 0.15
+
+        # 初動検知の観点: 証拠の鮮度を加点/減点
+        age_days = _evidence_freshness_days(n)
+        if age_days is not None:
+            if age_days <= 0.20:
+                score += 0.04
+            elif age_days <= 0.50:
+                score += 0.02
+            elif age_days >= 0.90:
+                score -= 0.03
 
         # 注視銘柄は同点時に前に出しやすくする（通常枠を壊さない範囲）
         if is_watch(n):
