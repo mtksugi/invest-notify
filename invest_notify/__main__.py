@@ -98,6 +98,27 @@ def main() -> int:
     p_review = sp.add_parser("review-history", help="review historical notifications for early-rise capture")
     p_review.add_argument("--history-dir", required=True, help="path to history root that contains YYYY-MM-DD dirs")
     p_review.add_argument("--out", default="data/history_review.json", help="output JSON report path")
+    p_review.add_argument(
+        "--backtest",
+        action="store_true",
+        help="enable Yahoo Finance price backtest (network required)",
+    )
+    p_review.add_argument("--pre-window-days", type=int, default=5, help="trading days before event for pre_return")
+    p_review.add_argument("--post-window-days", type=int, default=10, help="trading days after event for post_return")
+    p_review.add_argument(
+        "--rise-threshold",
+        type=float,
+        default=0.05,
+        help="abs return considered a 'rise' for early/late classification (default 0.05 = 5 percent)",
+    )
+    p_review.add_argument(
+        "--early-pre-band",
+        type=float,
+        default=0.03,
+        help="pre_return must be within ±this for 'early_capture' (default 0.03)",
+    )
+    p_review.add_argument("--cache-dir", default=None, help="directory to cache fetched price series")
+    p_review.add_argument("--fetch-sleep", type=float, default=0.0, help="sleep seconds between fetches (rate limit)")
 
     args = p.parse_args()
     watch_tickers = _load_watch_tickers_from_env()
@@ -276,7 +297,16 @@ def main() -> int:
         return 0
 
     if args.cmd == "review-history":
-        report = review_history(history_dir=Path(args.history_dir))
+        report = review_history(
+            history_dir=Path(args.history_dir),
+            backtest=bool(args.backtest),
+            pre_window_days=int(args.pre_window_days),
+            post_window_days=int(args.post_window_days),
+            rise_threshold=float(args.rise_threshold),
+            early_pre_band=float(args.early_pre_band),
+            cache_dir=args.cache_dir,
+            sleep_seconds=float(args.fetch_sleep),
+        )
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         import json
@@ -291,6 +321,19 @@ def main() -> int:
             except Exception:
                 ratio = 0.0
         print("late_reaction_ratio=" + str(ratio))
+        bt = report.get("price_backtest")
+        if isinstance(bt, dict):
+            s = bt.get("summary") or {}
+            print(
+                "backtest: evaluable=%d directional=%d early_capture=%.2f late_chase=%.2f hit_rate=%.2f"
+                % (
+                    int(bt.get("evaluable_count") or 0),
+                    int(bt.get("directional_count") or 0),
+                    float(s.get("early_capture_rate") or 0.0),
+                    float(s.get("late_chase_rate") or 0.0),
+                    float(s.get("hit_rate") or 0.0),
+                )
+            )
         return 0
 
     raise RuntimeError("unknown command")

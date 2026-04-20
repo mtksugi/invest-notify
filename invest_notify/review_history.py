@@ -3,16 +3,27 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .ai.stage2 import _cap_notifications
 from .signal_lexicon import LATE_REACTION_PATTERNS, STRUCTURE_MARKERS
+from .price_backtest import (
+    classify_capture,
+    compute_returns_for_notification,
+    fetch_price_series,
+)
 
 
 def _load_daily_notifications(history_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    """
+    history_dir 配下の YYYY-MM-DD/notifications.json をすべて読む。
+    history_dir/notifications.json のような単一ファイルにも対応する
+    （試運転用：1ファイルだけある場合でも動かしたい）。
+    """
     rows: list[tuple[str, dict[str, Any]]] = []
+    # YYYY-MM-DD/ ディレクトリ
     for day_dir in sorted(history_dir.glob("*/")):
         p = day_dir / "notifications.json"
         if not p.exists():
@@ -28,6 +39,28 @@ def _load_daily_notifications(history_dir: Path) -> list[tuple[str, dict[str, An
         for n in notifs:
             if isinstance(n, dict):
                 rows.append((day, n))
+
+    # 単一ファイル fallback
+    if not rows:
+        single = history_dir / "notifications.json"
+        if single.exists():
+            try:
+                obj = json.loads(single.read_text(encoding="utf-8"))
+            except Exception:
+                obj = {}
+            notifs = obj.get("notifications", []) if isinstance(obj, dict) else []
+            if isinstance(notifs, list):
+                # generated_at から日付を引く
+                gen = obj.get("generated_at") if isinstance(obj, dict) else None
+                day = "unknown"
+                if isinstance(gen, str):
+                    try:
+                        day = gen[:10]
+                    except Exception:
+                        day = "unknown"
+                for n in notifs:
+                    if isinstance(n, dict):
+                        rows.append((day, n))
     return rows
 
 
@@ -74,7 +107,250 @@ def _freshness_days_from_evidence(n: dict[str, Any]) -> float | None:
     return min(ages)
 
 
-def review_history(history_dir: str | Path) -> dict[str, Any]:
+def _expected_direction(n: dict[str, Any]) -> int:
+    """
+    通知が「どちらに動くと当たり」かを符号で返す。
+    - positive: +1（上昇で当たり）
+    - negative: -1（下落で当たり）
+    - mixed/unclear: 0（どちらでもない＝後追いだけ判定する）
+    """
+    impact = str(n.get("impact_direction") or "").strip().lower()
+    if impact == "positive":
+        return 1
+    if impact == "negative":
+        return -1
+    return 0
+
+
+def _event_dt_for_backtest(n: dict[str, Any], day: str) -> datetime | None:
+    """
+    バックテストの基準時刻を決める。優先順:
+    1. event_time
+    2. generated_at
+    3. day（YYYY-MM-DD）の 00:00 UTC
+    """
+    dt = _parse_iso_to_utc(n.get("event_time")) or _parse_iso_to_utc(n.get("generated_at"))
+    if dt is not None:
+        return dt
+    if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        return datetime.fromisoformat(day + "T00:00:00+00:00")
+    return None
+
+
+def _run_price_backtest(
+    rows: list[tuple[str, dict[str, Any]]],
+    *,
+    pre_window_days: int,
+    post_window_days: int,
+    rise_threshold: float,
+    early_pre_band: float,
+    cache_dir: Path,
+    sleep_seconds: float,
+) -> dict[str, Any]:
+    """
+    各通知 (day, n) について、ticker の Yahoo Finance 終値を取って
+    pre/post リターンと「捉え方」分類をつける。
+
+    返り値:
+    {
+      "params": {...},
+      "evaluable_count": int,            # 株価データが取れたもの
+      "directional_count": int,          # impact_direction が positive/negative のもの
+      "directional_results": [...],
+      "summary": {                       # 方向性ありに対する集計
+          "early_capture_rate": float,
+          "late_chase_rate": float,
+          "missed_rate": float,
+          "flat_rate": float,
+          "hit_rate": float,             # post の符号が想定方向と一致した割合
+          "mean_pre_return_signed": float,
+          "mean_post_return_signed": float,
+      },
+      "per_category": {cat: {early_capture_rate, late_chase_rate, hit_rate, n}},
+      "per_lane":     {lane: {...}},
+      "examples_late_chase": [...]       # 既に大きく上がってから通知された代表例
+      "examples_early_capture": [...]    # 通知後に動いた好例
+    }
+    """
+    # ticker ごとに必要レンジを束ねて1回だけfetch
+    by_ticker: dict[str, list[tuple[str, dict[str, Any], datetime]]] = defaultdict(list)
+    for day, n in rows:
+        ticker = str(n.get("ticker") or "").strip()
+        if not ticker:
+            continue
+        if ticker.startswith("^"):
+            # 指数は対象外
+            continue
+        ev_dt = _event_dt_for_backtest(n, day)
+        if ev_dt is None:
+            continue
+        by_ticker[ticker].append((day, n, ev_dt))
+
+    series_cache: dict[str, Any] = {}
+    for ticker, items in by_ticker.items():
+        dts = [it[2] for it in items]
+        start = min(dts) - timedelta(days=max(pre_window_days * 2, 14))
+        end = max(dts) + timedelta(days=max(post_window_days * 2, 14))
+        # 余裕を持って取り、未来側はAPI側でmax(today)に丸める想定
+        ps = fetch_price_series(
+            ticker,
+            start=start,
+            end=end,
+            cache_dir=cache_dir,
+            sleep_seconds=sleep_seconds,
+        )
+        series_cache[ticker] = ps
+
+    detail: list[dict[str, Any]] = []
+    classes_dir: Counter[str] = Counter()
+    classes_raw: Counter[str] = Counter()
+    pre_signed: list[float] = []
+    post_signed: list[float] = []
+    hits = 0
+    directional = 0
+
+    # impact_direction の方向に揃えて集計する（positive/negative のみ）
+    per_category_collect: defaultdict[str, list[str]] = defaultdict(list)
+    per_lane_collect: defaultdict[str, list[str]] = defaultdict(list)
+
+    examples_late_chase: list[dict[str, Any]] = []
+    examples_early_capture: list[dict[str, Any]] = []
+    examples_missed: list[dict[str, Any]] = []
+
+    for ticker, items in by_ticker.items():
+        ps = series_cache.get(ticker)
+        if ps is None or not getattr(ps, "timestamps", None):
+            continue
+        for day, n, ev_dt in items:
+            r = compute_returns_for_notification(
+                series=ps,
+                event_dt=ev_dt,
+                pre_window_days=pre_window_days,
+                post_window_days=post_window_days,
+            )
+            if r.pre_return is None and r.post_return is None:
+                continue
+            cls_raw = classify_capture(
+                pre_return=r.pre_return,
+                post_return=r.post_return,
+                rise_threshold=rise_threshold,
+                early_pre_band=early_pre_band,
+            )
+            classes_raw[cls_raw] += 1
+            cat = str(n.get("category") or "")
+            lane = str(n.get("lane") or "")
+
+            sign = _expected_direction(n)
+            # 集計用クラスは「期待方向に揃えた」ものを使う。
+            # mixed/unclear は方向が取れないので raw のまま参考表示する。
+            cls_for_bucket: str
+            if sign != 0:
+                pre_s = r.pre_return * sign if r.pre_return is not None else None
+                post_s = r.post_return * sign if r.post_return is not None else None
+                cls_for_bucket = classify_capture(
+                    pre_return=pre_s,
+                    post_return=post_s,
+                    rise_threshold=rise_threshold,
+                    early_pre_band=early_pre_band,
+                )
+            else:
+                cls_for_bucket = cls_raw
+
+            per_category_collect[cat].append(cls_for_bucket)
+            per_lane_collect[lane].append(cls_for_bucket)
+
+            d_entry = {
+                "day": day,
+                "ticker": ticker,
+                "category": cat,
+                "lane": lane,
+                "impact_direction": n.get("impact_direction"),
+                "pre_return": r.pre_return,
+                "post_return": r.post_return,
+                "class_raw": cls_raw,
+                "class_directional": cls_for_bucket if sign != 0 else None,
+                "summary_head": str(n.get("summary") or "")[:160],
+            }
+            detail.append(d_entry)
+
+            if sign != 0:
+                directional += 1
+                pre_s = (r.pre_return or 0.0) * sign
+                post_s = (r.post_return or 0.0) * sign
+                pre_signed.append(pre_s)
+                post_signed.append(post_s)
+                if (r.post_return or 0.0) * sign > 0:
+                    hits += 1
+                classes_dir[cls_for_bucket] += 1
+                if cls_for_bucket == "late_chase" and len(examples_late_chase) < 10:
+                    examples_late_chase.append(d_entry)
+                if cls_for_bucket == "early_capture" and len(examples_early_capture) < 10:
+                    examples_early_capture.append(d_entry)
+                if cls_for_bucket == "missed" and len(examples_missed) < 10:
+                    examples_missed.append(d_entry)
+
+    def _rate(c: Counter[str], total: int, key: str) -> float:
+        return (c.get(key, 0) / total) if total else 0.0
+
+    def _category_summary(items: dict[str, list[str]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k, lst in items.items():
+            if not lst:
+                continue
+            cnt = Counter(lst)
+            total = len(lst)
+            out[k] = {
+                "n": total,
+                "early_capture_rate": _rate(cnt, total, "early_capture"),
+                "late_chase_rate": _rate(cnt, total, "late_chase"),
+                "missed_rate": _rate(cnt, total, "missed"),
+                "flat_rate": _rate(cnt, total, "flat"),
+            }
+        return out
+
+    summary: dict[str, Any] = {}
+    if directional:
+        summary = {
+            "early_capture_rate": classes_dir.get("early_capture", 0) / directional,
+            "late_chase_rate": classes_dir.get("late_chase", 0) / directional,
+            "missed_rate": classes_dir.get("missed", 0) / directional,
+            "flat_rate": classes_dir.get("flat", 0) / directional,
+            "hit_rate": hits / directional,
+            "mean_pre_return_signed": (sum(pre_signed) / len(pre_signed)) if pre_signed else 0.0,
+            "mean_post_return_signed": (sum(post_signed) / len(post_signed)) if post_signed else 0.0,
+        }
+
+    return {
+        "params": {
+            "pre_window_days": pre_window_days,
+            "post_window_days": post_window_days,
+            "rise_threshold": rise_threshold,
+            "early_pre_band": early_pre_band,
+        },
+        "evaluable_count": len(detail),
+        "directional_count": directional,
+        "raw_class_counts": dict(classes_raw),
+        "directional_class_counts": dict(classes_dir),
+        "summary": summary,
+        "per_category": _category_summary(per_category_collect),
+        "per_lane": _category_summary(per_lane_collect),
+        "examples_late_chase": examples_late_chase,
+        "examples_early_capture": examples_early_capture,
+        "examples_missed": examples_missed,
+    }
+
+
+def review_history(
+    history_dir: str | Path,
+    *,
+    backtest: bool = False,
+    pre_window_days: int = 5,
+    post_window_days: int = 10,
+    rise_threshold: float = 0.05,
+    early_pre_band: float = 0.03,
+    cache_dir: str | Path | None = None,
+    sleep_seconds: float = 0.0,
+) -> dict[str, Any]:
     p = Path(history_dir)
     rows = _load_daily_notifications(p)
     by_day: defaultdict[str, int] = defaultdict(int)
@@ -244,5 +520,17 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
         },
         "examples_late_reaction": examples_late,
     }
-    return result
 
+    if backtest:
+        cache = Path(cache_dir) if cache_dir else (p.parent / "_yf_cache")
+        result["price_backtest"] = _run_price_backtest(
+            rows,
+            pre_window_days=pre_window_days,
+            post_window_days=post_window_days,
+            rise_threshold=rise_threshold,
+            early_pre_band=early_pre_band,
+            cache_dir=cache,
+            sleep_seconds=sleep_seconds,
+        )
+
+    return result

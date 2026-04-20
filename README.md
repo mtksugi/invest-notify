@@ -130,11 +130,21 @@ python -m invest_notify run --config config.yaml
 - `--dry-run`（任意）: 送信せず、stateも更新しない
 
 #### `review-history`
-- `--history-dir`（必須）: 日次履歴ディレクトリ（`YYYY-MM-DD/notifications.json` を含む）
+- `--history-dir`（必須）: 日次履歴ディレクトリ（`YYYY-MM-DD/notifications.json` を含む。
+  単一の `notifications.json` だけがあるディレクトリでも動作する）
 - `--out`（任意, デフォルト `data/history_review.json`）: 集計JSONの保存先
+- `--backtest`（任意）: Yahoo Finance チャートAPIを使って実際の株価リターンで検証する（要ネット）
+- `--pre-window-days`（任意, デフォルト `5`）: 通知前の参照営業日数
+- `--post-window-days`（任意, デフォルト `10`）: 通知後の参照営業日数
+- `--rise-threshold`（任意, デフォルト `0.05`）: 上昇/下落の閾値（5%）
+- `--early-pre-band`（任意, デフォルト `0.03`）: `early_capture` と判定する事前変動の許容幅（±3%）
+- `--cache-dir`（任意）: 取得した株価系列のキャッシュ保存先
+- `--fetch-sleep`（任意, デフォルト `0.0`）: ティッカーごとの fetch 間スリープ（秒）
 
 履歴から「通知の質」を振り返るための集計です。  
 `notifications.json` を読み、以下を出力します：
+
+**テキスト proxy（ネット不要）**
 - 通知件数（総数/日次平均/日次中央値）
 - lane/category/impact_direction ごとの内訳
 - 「後追い（already/rally/急騰/上昇を受け 等）」になりやすい文言の出現率
@@ -144,8 +154,27 @@ python -m invest_notify run --config config.yaml
 - 旧/新ランクで採択されるカテゴリ構成（件数）と後追い内訳の比較
 - 旧/新ランクでのティッカー多様性比較（ユニーク銘柄数、上位銘柄集中度）
 
+**株価バックテスト（`--backtest` 指定時のみ）**  
+SPECの目的「上がり始めを捉える」を直接評価するため、各通知について Yahoo Finance の日次終値から
+`pre_return`（通知前N営業日リターン）と `post_return`（通知後M営業日リターン）を算出し、
+`impact_direction` の方向に揃えて以下に分類します。
+
+- `early_capture`: 通知前は静か（|pre|≦early_pre_band）かつ通知後に想定方向へ上昇（|post|≧rise_threshold）
+- `late_chase`  : 通知前に既に想定方向へ動いていた（後追い）
+- `missed`      : 通知後に想定と逆方向へ動いた
+- `flat`        : 通知後ほぼ動かず
+
+`summary.early_capture_rate` / `late_chase_rate` / `hit_rate` がこのプロジェクトの主要KPIです。
+
 ```bash
+# テキスト proxy のみ（ネット不要）
 python -m invest_notify review-history --history-dir data/history_input/history --out data/history_review.json
+
+# 株価バックテストも実行
+python -m invest_notify review-history \
+  --history-dir data/history_input/history \
+  --out data/history_review.json \
+  --backtest --cache-dir data/_yf_cache
 ```
 
 ### 注視ティッカーのRSS強化（任意）
