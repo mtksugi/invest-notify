@@ -129,6 +129,46 @@ python -m invest_notify run --config config.yaml
 - `--state`（任意, デフォルト `data/state/sent_events.json`）
 - `--dry-run`（任意）: 送信せず、stateも更新しない
 
+#### `review-history`（通知の事後評価）
+過去の `data/history/<YYYY-MM-DD>/notifications.json` 群を読み込み、以下を出力します。
+
+- 件数分布（カテゴリ/レーン/impact/ticker Top20）
+- テキスト proxy（後追い表現/構造変化マーカーのヒット率、evidence鮮度中央値）
+- `--backtest` を付けると Yahoo Finance Chart API から日次終値を取得し、
+  - `pre_return` = 通知前 N営業日 → 直前クローズ の終値リターン
+  - `post_return` = 直前クローズ → 通知後 M営業日終値 のリターン
+  - 分類: `early_capture` / `late_chase` / `missed` / `flat`
+  - 全体・カテゴリ・レーン・impact・source_types 別の KPI
+  - 旧ランク（confidence 順） vs 新ランク（`_priority_score` 順）の KPI 比較（`rank_compare`）
+
+`impact_direction=negative` の通知は pre/post の符号を反転して「良い方向」前提で集計します（下落予想なら post<0 がヒット）。
+
+例:
+
+```bash
+python -m invest_notify review-history \
+  --history-dir data/history --out data/history_review.json \
+  --backtest --cache-dir data/_yf_cache
+```
+
+パラメータ:
+
+- `--history-dir`（必須）
+- `--out`（任意, デフォルト `data/history_review.json`）
+- `--max-confirmed` / `--max-early-warning`（任意, デフォルト `3` / `3`）: rank_compare 用
+- `--backtest`（任意, フラグ）: Yahoo Finance 株価バックテストを有効化
+- `--cache-dir`（任意, デフォルト `data/_yf_cache`）: 株価キャッシュ保存先
+- `--pre-window-days` / `--post-window-days`（任意, デフォルト `5` / `10`）
+- `--rise-threshold`（任意, デフォルト `0.05`）: early/late 分類の閾値
+- `--early-pre-band`（任意, デフォルト `0.03`）: 「pre 期間がまだ静か」と見なす幅
+- `--fetch-sleep`（任意, デフォルト `0.2`）: Yahoo へ過負荷をかけないための秒単位sleep
+- `--prefer-raw-pool`（任意, フラグ）: 同日に `notifications_pool.json`（`stage2` が併出する候補プール）がある場合はそちらの `raw_notifications` を入力にする
+
+> 備考: `stage2` は今後、最終選抜（`notifications.json`）に加えて選抜前の候補プール
+> `notifications_pool.json`（`{"raw_notifications": [...], "postprocessed_notifications": [...]}`）
+> を併出します。これが蓄積されると `review-history --prefer-raw-pool --backtest` で
+> スコア関数の変更前後を KPI で A/B 比較できます。
+
 ### 注視ティッカーのRSS強化（任意）
 
 `INVEST_NOTIFY_WATCH_TICKERS` に指定した銘柄の情報をより確実に拾いたい場合、`config.yaml` に Yahoo Finance の銘柄別RSSを追加できます。

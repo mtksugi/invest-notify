@@ -87,6 +87,35 @@ def main() -> int:
     p_send.add_argument("--window-days", type=int, default=3)
     p_send.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
 
+    p_review = sp.add_parser(
+        "review-history",
+        help="review past notifications.json with optional Yahoo Finance backtest",
+    )
+    p_review.add_argument(
+        "--history-dir",
+        required=True,
+        help="directory containing per-day subdirectories with notifications.json",
+    )
+    p_review.add_argument("--out", default="data/history_review.json", help="output JSON path")
+    p_review.add_argument("--max-confirmed", type=int, default=3)
+    p_review.add_argument("--max-early-warning", type=int, default=3)
+    p_review.add_argument(
+        "--backtest",
+        action="store_true",
+        help="enable Yahoo Finance price backtest (network required)",
+    )
+    p_review.add_argument("--cache-dir", default="data/_yf_cache", help="price cache directory")
+    p_review.add_argument("--pre-window-days", type=int, default=5)
+    p_review.add_argument("--post-window-days", type=int, default=10)
+    p_review.add_argument("--rise-threshold", type=float, default=0.05)
+    p_review.add_argument("--early-pre-band", type=float, default=0.03)
+    p_review.add_argument("--fetch-sleep", type=float, default=0.2)
+    p_review.add_argument(
+        "--prefer-raw-pool",
+        action="store_true",
+        help="when notifications_pool.json exists, use its raw_notifications instead of notifications.json",
+    )
+
     p_run = sp.add_parser("run", help="collect -> stage1 -> stage2 -> email (one-shot)")
     p_run.add_argument("--config", required=True)
     p_run.add_argument("--lookback-hours", type=int, default=24)
@@ -213,6 +242,25 @@ def main() -> int:
         # 送信成功後のみstate更新
         new_state = update_state_with_sent(state, allowed)
         save_state(state_path, new_state)
+        return 0
+
+    if args.cmd == "review-history":
+        from .review_history import review_history
+
+        review_history(
+            history_dir=Path(args.history_dir),
+            out_path=Path(args.out),
+            max_confirmed=args.max_confirmed,
+            max_early_warning=args.max_early_warning,
+            backtest=args.backtest,
+            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            pre_window_days=args.pre_window_days,
+            post_window_days=args.post_window_days,
+            rise_threshold=args.rise_threshold,
+            early_pre_band=args.early_pre_band,
+            fetch_sleep=args.fetch_sleep,
+            prefer_raw_pool=args.prefer_raw_pool,
+        )
         return 0
 
     if args.cmd == "run":
