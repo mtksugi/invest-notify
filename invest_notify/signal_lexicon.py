@@ -4,22 +4,46 @@ import re
 from typing import Iterable
 
 # 後追い（値動きが出た後）を示しやすい表現
+# 上昇/下落の双方向。実履歴で「既に下げた銘柄にネガ通知を当てる」パターンが late_chase の主因だったため、
+# 下落系の表現も追加する。
 LATE_REACTION_PATTERNS: tuple[str, ...] = (
+    # 双方向（時間/織り込み）
     r"すでに",
     r"既に",
+    r"織り込み済み",
+    r"already",
+    r"priced in",
+    # 上昇後追い
     r"急騰",
     r"急伸",
     r"上昇済み",
     r"上昇している",
     r"上昇を受け",
     r"株価.*上昇",
-    r"織り込み済み",
-    r"already",
-    r"rall(y|ied)",
+    r"値上がり",
+    r"高騰",
+    r"rall(y|ied|ying)",
     r"surged?",
     r"spiked?",
     r"jumped?",
-    r"priced in",
+    r"soared?",
+    # 下落後追い（実履歴で多発した「下げた後にネガ追加」を検知）
+    r"急落",
+    r"急下落",
+    r"急反落",
+    r"下落を受け",
+    r"株価.*下落",
+    r"売られ(た|る|て)",
+    r"値下がり",
+    r"暴落",
+    r"plunged?",
+    r"tumbled?",
+    r"slumped?",
+    r"sank",
+    r"sliding",
+    r"sold off",
+    r"selloff",
+    r"sell-off",
 )
 
 # 初動（構造変化）を示しやすい表現

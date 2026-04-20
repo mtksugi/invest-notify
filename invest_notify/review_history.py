@@ -16,15 +16,33 @@ from .price_backtest import (
 )
 
 
-def _load_daily_notifications(history_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+def _load_daily_notifications(
+    history_dir: Path, *, prefer_raw_pool: bool = False
+) -> list[tuple[str, dict[str, Any]]]:
     """
     history_dir 配下の YYYY-MM-DD/notifications.json をすべて読む。
     history_dir/notifications.json のような単一ファイルにも対応する
     （試運転用：1ファイルだけある場合でも動かしたい）。
+
+    prefer_raw_pool=True かつ同ディレクトリに notifications_pool.json があれば、
+    その raw_notifications を使う（後追い再ランクで効果を見るため）。
     """
     rows: list[tuple[str, dict[str, Any]]] = []
     # YYYY-MM-DD/ ディレクトリ
     for day_dir in sorted(history_dir.glob("*/")):
+        if prefer_raw_pool:
+            pool_p = day_dir / "notifications_pool.json"
+            if pool_p.exists():
+                try:
+                    pool_obj = json.loads(pool_p.read_text(encoding="utf-8"))
+                    raw = pool_obj.get("postprocessed_notifications") or pool_obj.get("raw_notifications")
+                    if isinstance(raw, list):
+                        for n in raw:
+                            if isinstance(n, dict):
+                                rows.append((day_dir.name, n))
+                        continue
+                except Exception:
+                    pass
         p = day_dir / "notifications.json"
         if not p.exists():
             continue
@@ -146,6 +164,7 @@ def _run_price_backtest(
     early_pre_band: float,
     cache_dir: Path,
     sleep_seconds: float,
+    by_day_notifs: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """
     各通知 (day, n) について、ticker の Yahoo Finance 終値を取って
@@ -320,7 +339,7 @@ def _run_price_backtest(
             "mean_post_return_signed": (sum(post_signed) / len(post_signed)) if post_signed else 0.0,
         }
 
-    return {
+    base = {
         "params": {
             "pre_window_days": pre_window_days,
             "post_window_days": post_window_days,
@@ -339,6 +358,162 @@ def _run_price_backtest(
         "examples_missed": examples_missed,
     }
 
+    # --- 旧ランク(confidence順) vs 新ランク(_cap_notifications) のバックテスト比較 ---
+    # 保存済み履歴の通知プールは _cap_notifications を「過去版」で並べたあとの結果。
+    # ここでは現在のスコアリングを各日のプールに再適用し、KPI が改善したかを測る。
+    if by_day_notifs:
+        rank_compare = _backtest_rank_compare(
+            by_day_notifs=by_day_notifs,
+            series_cache=series_cache,
+            pre_window_days=pre_window_days,
+            post_window_days=post_window_days,
+            rise_threshold=rise_threshold,
+            early_pre_band=early_pre_band,
+        )
+        base["rank_compare_backtest"] = rank_compare
+
+    return base
+
+
+def _backtest_one(
+    n: dict[str, Any],
+    *,
+    day: str,
+    series_cache: dict[str, Any],
+    pre_window_days: int,
+    post_window_days: int,
+    rise_threshold: float,
+    early_pre_band: float,
+) -> dict[str, Any] | None:
+    """単一通知の捕捉分類 (directional版) を返す。data不足は None。"""
+    ticker = str(n.get("ticker") or "").strip()
+    if not ticker or ticker.startswith("^"):
+        return None
+    ev_dt = _event_dt_for_backtest(n, day)
+    if ev_dt is None:
+        return None
+    ps = series_cache.get(ticker)
+    if ps is None or not getattr(ps, "timestamps", None):
+        return None
+    r = compute_returns_for_notification(
+        series=ps,
+        event_dt=ev_dt,
+        pre_window_days=pre_window_days,
+        post_window_days=post_window_days,
+    )
+    if r.pre_return is None and r.post_return is None:
+        return None
+    sign = _expected_direction(n)
+    if sign == 0:
+        cls = classify_capture(
+            pre_return=r.pre_return,
+            post_return=r.post_return,
+            rise_threshold=rise_threshold,
+            early_pre_band=early_pre_band,
+        )
+        return {"class": cls, "directional": False, "pre": r.pre_return, "post": r.post_return}
+    pre_s = r.pre_return * sign if r.pre_return is not None else None
+    post_s = r.post_return * sign if r.post_return is not None else None
+    cls = classify_capture(
+        pre_return=pre_s,
+        post_return=post_s,
+        rise_threshold=rise_threshold,
+        early_pre_band=early_pre_band,
+    )
+    return {"class": cls, "directional": True, "pre": r.pre_return, "post": r.post_return, "sign": sign}
+
+
+def _backtest_rank_compare(
+    *,
+    by_day_notifs: dict[str, list[dict[str, Any]]],
+    series_cache: dict[str, Any],
+    pre_window_days: int,
+    post_window_days: int,
+    rise_threshold: float,
+    early_pre_band: float,
+) -> dict[str, Any]:
+    """
+    各日プールに対して
+      - 旧ランク: lane別 confidence 上位3件
+      - 新ランク: _cap_notifications（現在の _priority_score 含む）
+    を選び、それぞれの KPI（early_capture_rate / late_chase_rate / hit_rate）を株価で測る。
+    """
+
+    def _conf(n: dict[str, Any]) -> float:
+        try:
+            return float(n.get("confidence") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _agg(picks: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+        c: Counter[str] = Counter()
+        directional = 0
+        hits = 0
+        pre_signed: list[float] = []
+        post_signed: list[float] = []
+        for day, n in picks:
+            r = _backtest_one(
+                n,
+                day=day,
+                series_cache=series_cache,
+                pre_window_days=pre_window_days,
+                post_window_days=post_window_days,
+                rise_threshold=rise_threshold,
+                early_pre_band=early_pre_band,
+            )
+            if r is None:
+                continue
+            if not r["directional"]:
+                continue
+            directional += 1
+            c[r["class"]] += 1
+            sign = r["sign"]
+            if r["pre"] is not None:
+                pre_signed.append(r["pre"] * sign)
+            if r["post"] is not None:
+                post_signed.append(r["post"] * sign)
+                if r["post"] * sign > 0:
+                    hits += 1
+        n_total = directional or 1  # 0除算回避
+        return {
+            "selected": len(picks),
+            "directional": directional,
+            "early_capture_rate": c.get("early_capture", 0) / n_total if directional else 0.0,
+            "late_chase_rate": c.get("late_chase", 0) / n_total if directional else 0.0,
+            "missed_rate": c.get("missed", 0) / n_total if directional else 0.0,
+            "flat_rate": c.get("flat", 0) / n_total if directional else 0.0,
+            "hit_rate": hits / n_total if directional else 0.0,
+            "mean_pre_return_signed": (sum(pre_signed) / len(pre_signed)) if pre_signed else 0.0,
+            "mean_post_return_signed": (sum(post_signed) / len(post_signed)) if post_signed else 0.0,
+            "class_counts": dict(c),
+        }
+
+    old_picks: list[tuple[str, dict[str, Any]]] = []
+    new_picks: list[tuple[str, dict[str, Any]]] = []
+    for day, day_notifs in by_day_notifs.items():
+        confirmed = sorted([n for n in day_notifs if n.get("lane") == "confirmed"], key=_conf, reverse=True)[:3]
+        early = sorted([n for n in day_notifs if n.get("lane") == "early_warning"], key=_conf, reverse=True)[:3]
+        seen_old: set[str] = set()
+        for n in confirmed + early:
+            k = f"{str(n.get('ticker') or '').strip()}:{str(n.get('category') or '').strip()}"
+            if not k or k in seen_old:
+                continue
+            seen_old.add(k)
+            old_picks.append((day, n))
+        for n in _cap_notifications(
+            day_notifs,
+            max_confirmed=3,
+            max_early_warning=3,
+            watch_tickers=None,
+            max_watch=0,
+        ):
+            new_picks.append((day, n))
+
+    return {
+        "old_rank": _agg(old_picks),
+        "new_rank": _agg(new_picks),
+    }
+
 
 def review_history(
     history_dir: str | Path,
@@ -350,9 +525,10 @@ def review_history(
     early_pre_band: float = 0.03,
     cache_dir: str | Path | None = None,
     sleep_seconds: float = 0.0,
+    prefer_raw_pool: bool = False,
 ) -> dict[str, Any]:
     p = Path(history_dir)
-    rows = _load_daily_notifications(p)
+    rows = _load_daily_notifications(p, prefer_raw_pool=prefer_raw_pool)
     by_day: defaultdict[str, int] = defaultdict(int)
     by_category: Counter[str] = Counter()
     by_lane: Counter[str] = Counter()
@@ -531,6 +707,7 @@ def review_history(
             early_pre_band=early_pre_band,
             cache_dir=cache,
             sleep_seconds=sleep_seconds,
+            by_day_notifs=dict(by_day_notifs),
         )
 
     return result

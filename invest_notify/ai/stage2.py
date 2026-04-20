@@ -62,7 +62,9 @@ def run_stage2(
 
     # LLM出力を運用ルールに寄せる（特にIRのスコープ制限）
     frag_text_by_url = _try_load_fragment_text_by_url(stage1_path=stage1_path)
+    raw_notifs = list(all_notifs)  # 後追い分析用に保存
     all_notifs = _postprocess_llm_notifications(all_notifs, frag_text_by_url=frag_text_by_url)
+    postprocessed_notifs = list(all_notifs)
 
     # 集約後に lane ごとに confidence 上位3件に絞る
     merged = _cap_notifications(
@@ -80,6 +82,29 @@ def run_stage2(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(resp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    # raw / postprocessed の通知プールを別ファイルに保存する（履歴バックテスト用）。
+    # これがあれば、後日 _priority_score の重み変更を「同じ raw プール」に再適用して KPI 比較できる。
+    # 既定の data/notifications.json と同じディレクトリに保存。
+    try:
+        pool_path = out.parent / (out.stem + "_pool.json")
+        pool_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": stage1.get("generated_at"),
+                    "raw_notifications": raw_notifs,
+                    "postprocessed_notifications": postprocessed_notifs,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        # 失敗しても本処理は止めない（評価用のサイドカーなので）
+        pass
+
     return resp
 
 
@@ -546,17 +571,20 @@ def _postprocess_llm_notifications(
             continue
 
         # 後追い説明になっているものは初動捕捉を阻害しやすいので抑制する。
+        # 60日履歴のバックテストで late_chase が ir 19.3% / lawsuit 23.8% / business_B2 12.6% / geopolitics 16.3%
+        # と全カテゴリで多発したため、全カテゴリに共通の抑制を適用する。
         # - geopolitics: 後追いの反復通知になりやすいため棄却
-        # - business_B2: 具体条件が薄いなら棄却、そうでなければconfirmed→early_warningに降格
+        # - business_B2 / ir / lawsuit: confirmed は early_warning に降格（情報自体は残すが「確度高」枠を消費させない）
+        # - business_B2 で具体条件が薄い場合はそもそも棄却
         if _is_late_move_reaction_text(t):
             if cat == "geopolitics":
                 continue
             if cat == "business_B2":
                 if not _has_concrete_financial_terms(t):
                     continue
-                if n.get("lane") == "confirmed":
-                    n = dict(n)
-                    n["lane"] = "early_warning"
+            if n.get("lane") == "confirmed":
+                n = dict(n)
+                n["lane"] = "early_warning"
 
         # business_B2 の confirmed は厳格化：
         # - 一次ソース(ir)が無い
@@ -797,26 +825,47 @@ def _cap_notifications(
     def _priority_score(n: dict[str, Any]) -> float:
         """
         初動を拾いやすくするための簡易スコア。
-        - 既存の confidence を土台にしつつ、構造変化を示す要素を加点
-        - 後追い（既に動いた後）らしい記述は減点
+
+        重み付けの根拠は60日409通知の Yahoo Finance バックテスト：
+
+        - impact_direction × 想定方向の的中率(post_return_signed):
+            positive(n=29):  post_signed=+2.4%  → 加点
+            negative(n=96):  post_signed=-1.0%  → 加点しない（むしろ微減点）
+            mixed(n=224):    方向検証不可だが post_raw が中庸  → 軽微減点（hedge 出力多発のため）
+            unclear(n=49):   方向検証不可  → 強めに減点
+        - category 別:
+            business_B2(post_raw=+1.92%): やや加点
+            geopolitics(post_signed=-4.1%, early=0%): 強めに減点
+            ir(post_raw=-1.81%): 加点しない
+            lawsuit(late_chase=36%): 後追い率高い → 加点しない
+        - lane 別:
+            confirmed(post_signed=+3.7%) > early_warning(post_signed=-3.1%) → confirmed 優遇
+        - 後追い文言（双方向）と古い証拠は強めに減点。負通知に後追いが重なるパターンは特に有害。
         """
         score = conf(n)
         cat = str(n.get("category") or "").strip()
         impact = str(n.get("impact_direction") or "").strip()
         source_types = n.get("source_types")
+
         if impact == "positive":
             score += 0.08
+        elif impact == "negative":
+            score -= 0.02
         elif impact == "mixed":
-            score += 0.03
-        elif impact in ("negative", "unclear"):
-            score -= 0.05
+            score -= 0.02
+        elif impact == "unclear":
+            score -= 0.08
 
-        if cat in ("business_B2", "ir"):
-            score += 0.05
+        if cat == "business_B2":
+            score += 0.04
+        elif cat == "ir":
+            score += 0.00
+        elif cat == "lawsuit":
+            score -= 0.02
         elif cat == "geopolitics":
-            score -= 0.04
+            score -= 0.10
 
-        if n.get("lane") == "early_warning" and impact in ("positive", "mixed"):
+        if n.get("lane") == "confirmed":
             score += 0.03
 
         if isinstance(source_types, list):
@@ -832,29 +881,39 @@ def _cap_notifications(
 
         if _has_structure_markers(n):
             score += 0.03
-        if _has_late_reaction_markers(n):
-            score -= 0.15
+
+        # 後追い文言: 双方向（上昇後追い/下落後追い）を強めに減点。
+        # 60日履歴で late_chase=24.8% が KPI 悪化の最大要因だったため。
+        is_late = _has_late_reaction_markers(n)
+        if is_late:
+            score -= 0.20
         if _is_oil_chase_geopolitics(n):
             score -= 0.12
 
-        # 初動検知の観点: 証拠の鮮度を加点/減点
+        # negative × late（既に売られた後のネガ追加）は実データで強く逆行
+        if impact == "negative" and is_late:
+            score -= 0.10
+
+        # 鮮度: 通知時点で既に平均+3.14%動いていた実態から、新鮮さを強めに評価
         age_days = _evidence_freshness_days(n)
         if age_days is not None:
             if age_days <= 0.20:
-                score += 0.04
+                score += 0.06
             elif age_days <= 0.50:
-                score += 0.02
+                score += 0.03
+            elif age_days >= 2.0:
+                score -= 0.10
             elif age_days >= 0.90:
-                score -= 0.03
+                score -= 0.05
 
         # 地政学の confirmed は、明確な実体/新規性が弱い場合に後追い化しやすい。
         if cat == "geopolitics" and n.get("lane") == "confirmed":
             if impact in ("mixed", "unclear"):
                 score -= 0.04
-            if _has_late_reaction_markers(n):
+            if is_late:
                 score -= 0.06
 
-        # 注視銘柄は同点時に前に出しやすくする（通常枠を壊さない範囲）
+        # 注視銘柄は同点時に前に出しやすくする
         if is_watch(n):
             score += 0.02
         return score

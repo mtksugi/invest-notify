@@ -140,6 +140,8 @@ python -m invest_notify run --config config.yaml
 - `--early-pre-band`（任意, デフォルト `0.03`）: `early_capture` と判定する事前変動の許容幅（±3%）
 - `--cache-dir`（任意）: 取得した株価系列のキャッシュ保存先
 - `--fetch-sleep`（任意, デフォルト `0.0`）: ティッカーごとの fetch 間スリープ（秒）
+- `--prefer-raw-pool`（任意）: 同日ディレクトリに `notifications_pool.json` があれば、3+3に絞る前の
+  postprocessed プールでバックテストする（`_priority_score` の重み変更を後追い評価するための入力）
 
 履歴から「通知の質」を振り返るための集計です。  
 `notifications.json` を読み、以下を出力します：
@@ -176,6 +178,26 @@ python -m invest_notify review-history \
   --out data/history_review.json \
   --backtest --cache-dir data/_yf_cache
 ```
+
+#### 60日/409通知の本番履歴で観測されたベースライン（参考）
+| 指標 | 値 | 意味 |
+| --- | --- | --- |
+| `early_capture_rate` | 8.0% | 通知後に想定方向へ初動が出た割合 |
+| `late_chase_rate` | 24.8% | 通知時点で既に想定方向へ動いていた（後追い）割合 |
+| `hit_rate` | 42.4% | 通知後の想定方向の的中率 |
+| `mean_pre_return_signed` | +3.14% | 通知時点で平均すでに+3.14%動いている＝**典型的な天井掴み傾向** |
+| `mean_post_return_signed` | -0.18% | 通知後はほぼ動かない/若干逆行 |
+
+→ 現状はSPECの「織り込み前を捉える」目的に対し、**約25%が後追い**になっている。
+特に `lawsuit late_chase=23.8%`、`mixed impact=55%` が悪化要因。
+
+参考：テキスト proxy の `late_reaction_ratio` は 4〜6% としか出ないが、株価で見ると後追いは
+24.8% と桁が違う。**proxy だけでKPIを語ると過小評価する**ため、`--backtest` を必ず併用する。
+
+#### 通知プールの後追い再ランク評価（`--prefer-raw-pool`）
+`stage2` 実行時に `notifications_pool.json` を同ディレクトリに保存するようにしたので、
+将来 `_priority_score` の重みを変えた際は、過去の raw プールに新スコアを再適用して
+`early_capture_rate` / `late_chase_rate` を A/B 比較できます。
 
 ### 注視ティッカーのRSS強化（任意）
 

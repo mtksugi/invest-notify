@@ -119,6 +119,11 @@ def main() -> int:
     )
     p_review.add_argument("--cache-dir", default=None, help="directory to cache fetched price series")
     p_review.add_argument("--fetch-sleep", type=float, default=0.0, help="sleep seconds between fetches (rate limit)")
+    p_review.add_argument(
+        "--prefer-raw-pool",
+        action="store_true",
+        help="if YYYY-MM-DD/notifications_pool.json exists, use the postprocessed pool instead of the final 3+3",
+    )
 
     args = p.parse_args()
     watch_tickers = _load_watch_tickers_from_env()
@@ -306,6 +311,7 @@ def main() -> int:
             early_pre_band=float(args.early_pre_band),
             cache_dir=args.cache_dir,
             sleep_seconds=float(args.fetch_sleep),
+            prefer_raw_pool=bool(args.prefer_raw_pool),
         )
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
