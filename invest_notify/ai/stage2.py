@@ -8,6 +8,7 @@ from typing import Any
 
 from .openai_compat import OpenAICompatConfig, chat_json
 from .prompts import STAGE2_SYSTEM, stage2_user
+from ..signal_lexicon import has_late_reaction_text, has_structure_marker_text
 
 
 def run_stage2(
@@ -265,23 +266,7 @@ def _postprocess_llm_notifications(
         return any(m in t for m in commentary_markers)
 
     def _is_late_move_reaction_text(t: str) -> bool:
-        """
-        既に値動きが出た後追い説明になっているシグナルを検知する。
-        初動捕捉を優先するため、後段で減点/棄却に使う。
-        """
-        patterns = [
-            r"すでに",
-            r"既に",
-            r"急騰",
-            r"株価.*上昇",
-            r"上昇を受け",
-            r"上昇している",
-            r"already",
-            r"rall(y|ied)",
-            r"surged?",
-            r"priced in",
-        ]
-        return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+        return has_late_reaction_text(t)
 
     def _items_mentioned(t: str) -> set[str]:
         """
@@ -774,24 +759,7 @@ def _cap_notifications(
 
     def _has_late_reaction_markers(n: dict[str, Any]) -> bool:
         t = _joined_text(n)
-        patterns = [
-            r"すでに",
-            r"既に",
-            r"急騰",
-            r"急伸",
-            r"上昇済み",
-            r"上昇している",
-            r"上昇を受け",
-            r"株価.*上昇",
-            r"織り込み済み",
-            r"already",
-            r"rall(y|ied)",
-            r"surged?",
-            r"spiked?",
-            r"jumped?",
-            r"priced in",
-        ]
-        return any(re.search(p, t, flags=re.IGNORECASE) for p in patterns)
+        return has_late_reaction_text(t)
 
     def _is_oil_chase_geopolitics(n: dict[str, Any]) -> bool:
         """
@@ -824,37 +792,7 @@ def _cap_notifications(
 
     def _has_structure_markers(n: dict[str, Any]) -> bool:
         t = _joined_text(n)
-        markers = [
-            "guidance",
-            "ガイダンス",
-            "修正",
-            "revise",
-            "contract",
-            "契約",
-            "締結",
-            "発効",
-            "開始",
-            "着手",
-            "量産",
-            "稼働",
-            "agreement",
-            "commence",
-            "launch",
-            "effective",
-            "signed",
-            "start of production",
-            "mass production",
-            "capacity expansion",
-            "規制",
-            "regulation",
-            "supply",
-            "供給",
-            "dilution",
-            "希薄化",
-            "buyback",
-            "自社株買い",
-        ]
-        return any(m.lower() in t for m in markers)
+        return has_structure_marker_text(t)
 
     def _priority_score(n: dict[str, Any]) -> float:
         """

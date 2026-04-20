@@ -8,38 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .ai.stage2 import _cap_notifications
-
-
-LATE_PATTERNS = [
-    r"すでに",
-    r"既に",
-    r"急騰",
-    r"上昇している",
-    r"上昇を受け",
-    r"株価.*上昇",
-    r"already",
-    r"rall(y|ied)",
-    r"surged?",
-    r"priced in",
-]
-
-STRUCTURE_MARKERS = [
-    "guidance",
-    "ガイダンス",
-    "修正",
-    "revise",
-    "contract",
-    "契約",
-    "agreement",
-    "規制",
-    "regulation",
-    "supply",
-    "供給",
-    "dilution",
-    "希薄化",
-    "buyback",
-    "自社株買い",
-]
+from .signal_lexicon import LATE_REACTION_PATTERNS, STRUCTURE_MARKERS
 
 
 def _load_daily_notifications(history_dir: Path) -> list[tuple[str, dict[str, Any]]]:
@@ -123,7 +92,7 @@ def review_history(history_dir: str | Path) -> dict[str, Any]:
 
     by_day_notifs: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    compiled = [re.compile(x, flags=re.IGNORECASE) for x in LATE_PATTERNS]
+    compiled = [re.compile(x, flags=re.IGNORECASE) for x in LATE_REACTION_PATTERNS]
 
     for day, n in rows:
         by_day[day] += 1
