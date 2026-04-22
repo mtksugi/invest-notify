@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .collect import collect_fragments, write_fragments_json
 from .email_render import render_email
+from .price_gate import annotate_notifications_with_price_gate
 from .state import filter_recently_sent, load_state, save_state, update_state_with_sent
 from .validate import validate_notifications
 from .ai.openai_compat import load_openai_compat_config_from_env_for_stage
@@ -79,6 +80,11 @@ def main() -> int:
     p_email.add_argument("--state", default="data/state/sent_events.json")
     p_email.add_argument("--out", default="data/email.txt")
     p_email.add_argument("--window-days", type=int, default=3)
+    p_email.add_argument(
+        "--no-price-gate",
+        action="store_true",
+        help="disable pre-send Yahoo Finance price gate (default: on)",
+    )
 
     p_send = sp.add_parser("send", help="send email via SMTP (SES) and update state on success")
     p_send.add_argument("--notifications", default="data/notifications.json")
@@ -86,6 +92,11 @@ def main() -> int:
     p_send.add_argument("--out", default="data/email.txt", help="also write rendered email body here")
     p_send.add_argument("--window-days", type=int, default=3)
     p_send.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
+    p_send.add_argument(
+        "--no-price-gate",
+        action="store_true",
+        help="disable pre-send Yahoo Finance price gate (default: on)",
+    )
 
     p_review = sp.add_parser(
         "review-history",
@@ -122,6 +133,11 @@ def main() -> int:
     p_run.add_argument("--per-collector-limit", type=int, default=500)
     p_run.add_argument("--state", default="data/state/sent_events.json")
     p_run.add_argument("--dry-run", action="store_true", help="do not send, do not update state")
+    p_run.add_argument(
+        "--no-price-gate",
+        action="store_true",
+        help="disable pre-send Yahoo Finance price gate (default: on)",
+    )
 
     args = p.parse_args()
     watch_tickers = _load_watch_tickers_from_env()
@@ -193,6 +209,11 @@ def main() -> int:
             raise RuntimeError("notifications.json must contain notifications[]")
 
         state = load_state(Path(args.state))
+        # 株価ゲートは state dedupe より前に適用（suppress されたものは state にも入らない）
+        if not args.no_price_gate:
+            notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
+        else:
+            price_suppressed = []
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
@@ -202,7 +223,9 @@ def main() -> int:
         # HTMLも同時に出力（確認/デバッグ用）
         out_html = out.with_suffix(out.suffix + ".html") if out.suffix else Path(str(out) + ".html")
         out_html.write_text(html_body, encoding="utf-8")
-        print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {args.out}")
+        print(
+            f"Wrote email ({len(allowed)} items, suppressed dedupe={len(suppressed)} gate={len(price_suppressed)}) -> {args.out}"
+        )
         return 0
 
     if args.cmd == "send":
@@ -221,6 +244,10 @@ def main() -> int:
 
         state_path = Path(args.state)
         state = load_state(state_path)
+        if not args.no_price_gate:
+            notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
+        else:
+            price_suppressed = []
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
@@ -231,13 +258,17 @@ def main() -> int:
         out_html.write_text(html_body, encoding="utf-8")
 
         if args.dry_run:
-            print(f"[dry-run] Would send email ({len(allowed)} items, suppressed {len(suppressed)})")
+            print(
+                f"[dry-run] Would send email ({len(allowed)} items, suppressed dedupe={len(suppressed)} gate={len(price_suppressed)})"
+            )
             print(f"Wrote email body -> {args.out}")
             return 0
 
         smtp_cfg = load_smtp_config_from_env()
         send_email(cfg=smtp_cfg, subject=subject, text_body=text_body, html_body=html_body)
-        print(f"Sent email ({len(allowed)} items, suppressed {len(suppressed)})")
+        print(
+            f"Sent email ({len(allowed)} items, suppressed dedupe={len(suppressed)} gate={len(price_suppressed)})"
+        )
 
         # 送信成功後のみstate更新
         new_state = update_state_with_sent(state, allowed)
@@ -300,11 +331,17 @@ def main() -> int:
         notifs = out.get("notifications", [])
         state_path = Path(args.state)
         state = load_state(state_path)
+        if not args.no_price_gate:
+            notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
+        else:
+            price_suppressed = []
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=3)
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         email_path.write_text(text_body, encoding="utf-8")
         email_path.with_suffix(email_path.suffix + ".html").write_text(html_body, encoding="utf-8")
-        print(f"Wrote email ({len(allowed)} items, suppressed {len(suppressed)}) -> {email_path}")
+        print(
+            f"Wrote email ({len(allowed)} items, suppressed dedupe={len(suppressed)} gate={len(price_suppressed)}) -> {email_path}"
+        )
 
         if args.dry_run:
             print("[dry-run] Not sending, not updating state")
