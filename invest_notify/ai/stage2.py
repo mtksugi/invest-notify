@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..signal_lexicon import (
+    has_late_down,
+    has_late_reaction,
+    has_late_up,
+    has_structure_marker,
+)
 from .openai_compat import OpenAICompatConfig, chat_json
 from .prompts import STAGE2_SYSTEM, stage2_user
 
@@ -60,9 +67,10 @@ def run_stage2(
 
     # LLM出力を運用ルールに寄せる（特にIRのスコープ制限）
     frag_text_by_url = _try_load_fragment_text_by_url(stage1_path=stage1_path)
+    raw_notifs_pre_postprocess = [dict(n) for n in all_notifs if isinstance(n, dict)]
     all_notifs = _postprocess_llm_notifications(all_notifs, frag_text_by_url=frag_text_by_url)
 
-    # 集約後に lane ごとに confidence 上位3件に絞る
+    # 集約後に lane ごとに優先スコア上位N件に絞る
     merged = _cap_notifications(
         all_notifs,
         max_confirmed=max_confirmed,
@@ -78,6 +86,19 @@ def run_stage2(
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(resp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    # 選抜前の候補プールを別ファイルに残しておく（A/B評価・再ランク用）。
+    # 履歴レビュー時に「最終3+3件」ではなくプール全体を対象に再ランクできるようにする。
+    pool_path = out.with_name(out.stem + "_pool" + out.suffix) if out.suffix else Path(str(out) + "_pool.json")
+    pool_obj = {
+        "generated_at": stage1.get("generated_at"),
+        "raw_notifications": raw_notifs_pre_postprocess,
+        "postprocessed_notifications": all_notifs,
+    }
+    try:
+        pool_path.write_text(json.dumps(pool_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
     return resp
 
 
@@ -629,6 +650,24 @@ def _postprocess_llm_notifications(
         if n.get("impact_direction") == "unclear" and n.get("lane") == "confirmed":
             n = dict(n)
             n["lane"] = "early_warning"
+
+        # late_chase 表現 + confirmed は early_warning に降格（実データで hit/post が有意に悪い）。
+        # これは business_B2 に限らず ir / lawsuit / geopolitics でも共通。
+        if n.get("lane") == "confirmed":
+            text_for_late = " ".join(
+                [
+                    str(n.get("summary") or ""),
+                    *[
+                        str(e.get("title") or "")
+                        for e in (n.get("evidence") or [])[:5]
+                        if isinstance(e, dict)
+                    ],
+                ]
+            )
+            if has_late_reaction(text_for_late):
+                n = dict(n)
+                n["lane"] = "early_warning"
+
         final.append(n)
 
     return final
@@ -676,6 +715,170 @@ def _compact_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _notif_text(n: dict[str, Any]) -> str:
+    """通知テキスト（summary + evidence title）を結合して小文字化。語彙検出用。"""
+    parts: list[str] = []
+    s = n.get("summary")
+    if isinstance(s, str):
+        parts.append(s)
+    ev = n.get("evidence")
+    if isinstance(ev, list):
+        for e in ev[:5]:
+            if isinstance(e, dict):
+                title = e.get("title")
+                if isinstance(title, str) and title:
+                    parts.append(title)
+    for k in ("why_not_priced_in", "unknowns", "next_checks"):
+        v = n.get(k)
+        if isinstance(v, list):
+            parts.extend([x for x in v if isinstance(x, str)])
+    return "\n".join(parts).lower()
+
+
+def _evidence_freshness_days(n: dict[str, Any]) -> float | None:
+    """event_time (or generated_at) と、最古の evidence.published_at との差（日）。"""
+
+    def _parse(s: Any) -> datetime | None:
+        if not isinstance(s, str) or not s:
+            return None
+        try:
+            s2 = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s2)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    base = _parse(n.get("event_time")) or _parse(n.get("generated_at"))
+    if base is None:
+        return None
+    ev = n.get("evidence")
+    if not isinstance(ev, list) or not ev:
+        return None
+    best: float | None = None
+    for e in ev[:10]:
+        if not isinstance(e, dict):
+            continue
+        pub = _parse(e.get("published_at"))
+        if pub is None:
+            continue
+        diff = (base - pub).total_seconds() / 86400.0
+        if best is None or diff < best:
+            best = diff
+    return best
+
+
+def _priority_score(n: dict[str, Any]) -> float:
+    """
+    選抜の優先スコア。
+
+    重み付けは 60日履歴 × Yahoo Finance 日次バックテストの分析結果に基づく:
+
+    - lane=confirmed は post_signed=+2.64% に対し early_warning は+0.36% → confirmed を優遇
+    - impact=negative は post_signed=-1.08% かつ late_chase=29.9% → 減点
+    - impact=mixed / positive / unclear は post_signed が+1.5%前後 → 微増〜中立
+    - category=ir は post_signed=-0.68% → 微減、他は中立〜微増
+    - 後追い表現（上昇系/下落系）が summary/evidence title にある → 強めに減点
+    - impact=negative かつ 下落後追い表現 → さらに追加減点
+    - evidence 鮮度（<=0.2日=即時）で加点、>=2日で減点
+    - 構造変化マーカーあり → +
+    - source_types=news,sns（複数ソース一致）で加点（実績 early=26.3%）
+
+    confidence は LLM 任意の数字なので重みを抑え、小差のタイブレークに留める。
+    """
+    score = 0.0
+
+    try:
+        conf = float(n.get("confidence") or 0.0)
+    except Exception:
+        conf = 0.0
+    score += 0.05 * conf  # base ±0.05
+
+    lane = (n.get("lane") or "").strip().lower()
+    if lane == "confirmed":
+        score += 0.05  # confirmed の post は +2.64%
+
+    impact = (n.get("impact_direction") or "").strip().lower()
+    if impact == "positive":
+        score += 0.03
+    elif impact == "mixed":
+        score += 0.02
+    elif impact == "unclear":
+        score += 0.01
+    elif impact == "negative":
+        score -= 0.05  # post_signed=-1.08%
+
+    cat = (n.get("category") or "").strip().lower()
+    if cat == "ir":
+        score -= 0.03  # post_signed=-0.68%
+    elif cat == "business_B2" or cat == "business_b2":
+        score += 0.02
+    elif cat == "lawsuit":
+        score += 0.02  # post_signed=+2.10%（ただし late_chase=26% は別途減点）
+    elif cat == "geopolitics":
+        score += 0.01  # post_signed=+0.46% ほぼ中立
+
+    text = _notif_text(n)
+    late_down = has_late_down(text)
+    late_up = has_late_up(text)
+    late = late_down or late_up
+    if late:
+        score -= 0.15
+        # 下落後追い + impact=negative は特に悪い（pre<-5% で post=-5.65%）
+        if late_down and impact == "negative":
+            score -= 0.08
+        # 上昇後追い + impact=positive もやや悪い（pre>=+10% で post=-2.12%）
+        if late_up and impact == "positive":
+            score -= 0.05
+
+    if has_structure_marker(text):
+        score += 0.04
+
+    fresh = _evidence_freshness_days(n)
+    if fresh is not None:
+        if fresh <= 0.2:
+            score += 0.04
+        elif fresh >= 2.0:
+            score -= 0.06
+
+    # evidence 多様性（複数ホスト）: news が複数社で裏取りされていると信頼度↑
+    try:
+        hosts = set()
+        for e in (n.get("evidence") or [])[:10]:
+            if isinstance(e, dict) and e.get("source_type") == "news":
+                u = e.get("url")
+                if isinstance(u, str) and u:
+                    from urllib.parse import urlparse
+
+                    h = (urlparse(u).hostname or "").lower()
+                    if h:
+                        hosts.add(h)
+        if len(hosts) >= 2:
+            score += 0.02
+    except Exception:
+        pass
+
+    src_types = n.get("source_types")
+    if isinstance(src_types, list):
+        s = sorted(set(str(x) for x in src_types))
+        if s == ["news", "sns"]:
+            score += 0.03  # 実績: early_capture=26.3% と高い
+        if s == ["ir"] and cat == "ir":
+            score += 0.01  # 一次ソース IR は軽く加点
+        if s == ["sns"]:
+            # SNS単体は LLM 側で既に制限されているが、実績 n=3 でノイズ混入しやすいので中立
+
+            pass
+
+    # 指数（^N225等）は通知しない（postprocessで既に除外されているが保険）
+    tkr = str(n.get("ticker") or "")
+    if tkr.startswith("^"):
+        score -= 0.30
+
+    return score
+
+
 def _cap_notifications(
     notifs: list[dict[str, Any]],
     *,
@@ -686,12 +889,8 @@ def _cap_notifications(
 ) -> list[dict[str, Any]]:
     watch = {str(x).strip().upper() for x in (watch_tickers or []) if isinstance(x, str) and x.strip()}
 
-    def conf(n: dict[str, Any]) -> float:
-        v = n.get("confidence")
-        try:
-            return float(v)
-        except Exception:
-            return 0.0
+    def score(n: dict[str, Any]) -> float:
+        return _priority_score(n)
 
     def is_watch(n: dict[str, Any]) -> int:
         t = str(n.get("ticker") or "").strip().upper()
@@ -700,21 +899,21 @@ def _cap_notifications(
     confirmed_all = [n for n in notifs if n.get("lane") == "confirmed"]
     early_all = [n for n in notifs if n.get("lane") == "early_warning"]
 
-    # 通常枠（仕様の上限）は watch で歪めない。純粋に confidence 上位を採用する。
-    confirmed_main = sorted(confirmed_all, key=conf, reverse=True)[: max(0, int(max_confirmed))]
-    early_main = sorted(early_all, key=conf, reverse=True)[: max(0, int(max_early_warning))]
+    # 通常枠は watch で歪めない。純粋に優先スコア上位を採用する。
+    confirmed_main = sorted(confirmed_all, key=score, reverse=True)[: max(0, int(max_confirmed))]
+    early_main = sorted(early_all, key=score, reverse=True)[: max(0, int(max_early_warning))]
 
-    # 重複キー（ticker:category）は先勝ち
-    seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    # 重複キー（ticker:category）は優先スコア高い方を採用
+    seen: dict[str, dict[str, Any]] = {}
     for n in confirmed_main + early_main:
         t = str(n.get("ticker") or "").strip()
         c = str(n.get("category") or "").strip()
         k = f"{t}:{c}"
         if k in seen:
-            continue
-        seen.add(k)
-        out.append(n)
+            if score(n) <= score(seen[k]):
+                continue
+        seen[k] = n
+    out: list[dict[str, Any]] = list(seen.values())
 
     # 注視ティッカーは「別枠」として追加で最大N件まで載せる（強制枠ではない）
     # - 既に通常枠で採用されている event_id は重複して載せない
@@ -740,14 +939,14 @@ def _cap_notifications(
             # 同程度なら confirmed を前に
             return 1 if n.get("lane") == "confirmed" else 0
 
-        remaining_watch = sorted(remaining_watch, key=lambda n: (lane_rank(n), conf(n)), reverse=True)[:max_watch]
+        remaining_watch = sorted(remaining_watch, key=lambda n: (lane_rank(n), score(n)), reverse=True)[:max_watch]
         for n in remaining_watch:
             t = str(n.get("ticker") or "").strip()
             c = str(n.get("category") or "").strip()
             k = f"{t}:{c}"
             if k in seen:
                 continue
-            seen.add(k)
+            seen[k] = n
             n2 = dict(n)
             n2["bucket"] = "watch"  # validate/emailで「別枠」として扱う
             out.append(n2)
