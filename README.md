@@ -46,6 +46,7 @@ OpenAI互換APIを利用します（環境変数で指定）。
 - `INVEST_NOTIFY_UA_CONTACT`（任意。SECなどがUser-Agentに連絡先を要求する場合のメールアドレス）
 - `INVEST_NOTIFY_WATCH_TICKERS`（任意。注視ティッカー。カンマ区切り。例: `AAPL,MSFT,7203.T`）
 - `INVEST_NOTIFY_WATCH_MAX`（任意。注視ティッカーの別枠（追加枠）上限。デフォルト: 注視ティッカーがあれば `3`）
+- `INVEST_NOTIFY_PRICE_GATE`（任意。`off` / `0` / `false` / `disabled` にすると送信直前の株価ゲートを無効化。デフォルトは有効）
 
 `.env` がプロジェクト直下にある場合は、起動時に自動ロードします（既に環境変数がある場合はそちら優先）。
 テンプレートは `.env.example`。
@@ -114,6 +115,7 @@ python -m invest_notify run --config config.yaml
 - `--state`（任意, デフォルト `data/state/sent_events.json`）: 3日重複抑制の状態ファイル
 - `--out`（任意, デフォルト `data/email.txt`）: メール本文出力先
 - `--window-days`（任意, デフォルト `3`）: 重複抑制日数
+- `--no-price-gate`（任意）: 送信直前の株価ゲートを無効化
 
 #### `send`
 - `--notifications`（任意, デフォルト `data/notifications.json`）: 通知JSON
@@ -121,6 +123,7 @@ python -m invest_notify run --config config.yaml
 - `--out`（任意, デフォルト `data/email.txt`）: 生成した本文も保存する
 - `--window-days`（任意, デフォルト `3`）: 重複抑制日数
 - `--dry-run`（任意）: 送信せず、stateも更新しない（動作確認用）
+- `--no-price-gate`（任意）: 送信直前の株価ゲートを無効化
 
 #### `run`
 - `--config`（必須）: YAML設定
@@ -128,6 +131,25 @@ python -m invest_notify run --config config.yaml
 - `--per-collector-limit`（任意, デフォルト `500`）
 - `--state`（任意, デフォルト `data/state/sent_events.json`）
 - `--dry-run`（任意）: 送信せず、stateも更新しない
+- `--no-price-gate`（任意）: 送信直前の株価ゲートを無効化
+
+#### 送信直前の株価ゲート（price-gate）
+
+60日履歴×Yahoo Financeバックテストの結果から、以下パターンが発見されました:
+
+- `pre_return >= +10%` → post_signed=-2.12%（既に噴いた後）
+- `pre_return <= -5%` × `impact=negative` → post_signed=-5.65%（崩れた後のネガ追従）
+
+`email` / `send` / `run` の実行時、デフォルトで各通知 ticker の直近 5 営業日リターンを
+Yahoo Finance から取得し、以下を行います。
+
+1. メール本文に「直近株価変動: +8.3%(5d) / 方向調整後 +8.3%」のように表示
+2. `impact=negative` かつ `pre_return <= -10%` は通知を除外
+3. `impact=positive` かつ `pre_return >= +15%` は通知を除外
+4. `confirmed` で `pre_signed >= +10%` または `pre_signed <= -5%` は `early_warning` に降格
+
+株価取得に失敗した銘柄（上場廃止/Yahoo未対応銘柄）は、安全側として**そのまま通します**。
+無効化は `--no-price-gate` または `INVEST_NOTIFY_PRICE_GATE=off`。
 
 #### `review-history`（通知の事後評価）
 過去の `data/history/<YYYY-MM-DD>/notifications.json` 群を読み込み、以下を出力します。

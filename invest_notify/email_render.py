@@ -56,6 +56,29 @@ def render_email(notifications: list[dict[str, Any]], *, watch_tickers: list[str
     lines_text.append(subject)
     lines_text.append("")
 
+    def _pre_return_label(n: dict[str, Any]) -> str:
+        pre = n.get("pre_return_gate_pct")
+        pre_s = n.get("pre_return_gate_signed_pct")
+        w = n.get("pre_return_gate_window_days")
+        if pre is None:
+            return ""
+        try:
+            pre_f = float(pre)
+            w_i = int(w) if w is not None else 5
+        except Exception:
+            return ""
+        signed_str = ""
+        if pre_s is not None:
+            try:
+                signed_str = f" / 方向調整後 {float(pre_s):+.1f}%"
+            except Exception:
+                signed_str = ""
+        action = n.get("price_gate_action")
+        action_str = ""
+        if action == "downgrade" or action == "downgraded":
+            action_str = " ⚠後追い降格"
+        return f"{pre_f:+.1f}%({w_i}d){signed_str}{action_str}"
+
     def _render_items_text(items: list[dict[str, Any]]):
         for idx, n in enumerate(items, start=1):
             ticker = str(n.get("ticker") or "").strip()
@@ -65,6 +88,9 @@ def render_email(notifications: list[dict[str, Any]], *, watch_tickers: list[str
             yf = _yahoo_finance_url(ticker)
             if yf:
                 lines_text.append(f"Yahoo: {yf}")
+            pre_label = _pre_return_label(n)
+            if pre_label:
+                lines_text.append(f"直近株価変動: {pre_label}")
             lines_text.append(str(n.get("summary", "")).strip())
             lines_text.append("")
             lines_text.append("- 影響: " + str(n.get("impact_direction")))
@@ -153,6 +179,9 @@ def render_email(notifications: list[dict[str, Any]], *, watch_tickers: list[str
                 blocks.append(f"<h4>{esc(header)}</h4>")
                 if yf:
                     blocks.append(f'<p><a href="{esc(yf)}">Yahoo Finance: {esc(ticker)}</a></p>')
+                pre_label = _pre_return_label(n)
+                if pre_label:
+                    blocks.append(f"<p><b>直近株価変動</b>: {esc(pre_label)}</p>")
                 blocks.append(f"<p>{esc(str(n.get('summary') or '').strip())}</p>")
                 blocks.append(f"<p><b>影響</b>: {esc(n.get('impact_direction'))}</p>")
                 blocks.append(f"<p><b>織り込み前の可能性</b></p>{p_list(list(n.get('why_not_priced_in', [])[:3]))}")

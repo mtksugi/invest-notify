@@ -668,6 +668,23 @@ def _postprocess_llm_notifications(
                 n = dict(n)
                 n["lane"] = "early_warning"
 
+        # IR × negative の confirmed は原則禁止。
+        # 60日実績で ir の post_signed=-0.68%、late_chase=25.6% と悪く、
+        # 同日 8-K の negative 開示は「悪材料開示＝即日売り浴びせ後」になりやすいため、
+        # 破綻級（Item 1.03/2.03/2.04）かつ一次ソース（ir）を持つ場合に限り confirmed を許可。
+        if (
+            (n.get("category") == "ir")
+            and (n.get("impact_direction") == "negative")
+            and (n.get("lane") == "confirmed")
+        ):
+            t_all = _text(n)
+            items_all = _items_mentioned(t_all)
+            has_bankruptcy_item = bool(items_all & {"1.03", "2.03", "2.04"})
+            has_ir_source = _has_primary_ir_evidence(n)
+            if not (has_bankruptcy_item and has_ir_source):
+                n = dict(n)
+                n["lane"] = "early_warning"
+
         final.append(n)
 
     return final
@@ -800,18 +817,33 @@ def _priority_score(n: dict[str, Any]) -> float:
         score += 0.05  # confirmed の post は +2.64%
 
     impact = (n.get("impact_direction") or "").strip().lower()
+    # mixed は原則ノイズ扱い（60日実績で件数比率が約45%あり方向検証不能）。
+    # ただし summary で「【方向性拮抗】」と明示的にタグ付けされている場合だけは LLM の意図的な mixed として中立扱い。
+    summary_text = str(n.get("summary") or "")
+    mixed_tagged = "【方向性拮抗】" in summary_text
+    unclear_tagged = "【推論波及】" in summary_text
     if impact == "positive":
         score += 0.03
     elif impact == "mixed":
-        score += 0.02
+        if mixed_tagged:
+            score += 0.00  # 中立: LLM が条件を満たして意図的に mixed にした
+        else:
+            score -= 0.04  # 方向を決めきれなかった mixed はノイズ
     elif impact == "unclear":
-        score += 0.01
+        if unclear_tagged:
+            score += 0.00
+        else:
+            score -= 0.03
     elif impact == "negative":
         score -= 0.05  # post_signed=-1.08%
 
     cat = (n.get("category") or "").strip().lower()
     if cat == "ir":
         score -= 0.03  # post_signed=-0.68%
+        # ir × negative は late_chase 常習で特に悪いため追加減点。
+        # （60日実績で ir カテゴリ全体の late_chase=25.6%、ネガ通知はほぼ開示時点で売られた後）
+        if impact == "negative":
+            score -= 0.05
     elif cat == "business_B2" or cat == "business_b2":
         score += 0.02
     elif cat == "lawsuit":
