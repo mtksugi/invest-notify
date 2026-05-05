@@ -5,6 +5,12 @@ Starter プラン想定:
 - 5年分の履歴
 - 米国カバレッジ
 
+エンドポイント仕様:
+- 2026年時点では ``/stable/`` ベースのエンドポイントを使う必要がある
+  （旧 ``/api/v3/`` は Starter 以上で 403 Forbidden を返す）
+- ティッカーはパスではなく ``?symbol=AAPL`` クエリパラメータで指定する
+- 認証は ``?apikey=YOUR_API_KEY`` または ``apikey: YOUR_API_KEY`` ヘッダ
+
 設計方針:
 - 全レスポンスは ``data/radar/_fmp_cache/<endpoint>/<ticker>.json`` にキャッシュ
 - キャッシュには ``_fetched_at`` を埋め、TTL 判定で再取得制御
@@ -20,7 +26,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -28,8 +34,7 @@ from urllib.parse import urlencode
 import requests
 
 
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
-FMP_BASE_URL_V4 = "https://financialmodelingprep.com/api/v4"
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_CACHE_TTL_SECONDS = 6 * 24 * 3600  # ファンダ用 6日
 
 
@@ -96,6 +101,16 @@ def _write_cache(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
 
 
+def _redact_apikey(url: str) -> str:
+    import re
+
+    return re.sub(r"(apikey=)[^&]+", r"\1***", url)
+
+
+class FmpHttpError(RuntimeError):
+    """FMP がエラーレスポンスを返したことを示す例外（プラン制限/認証など）."""
+
+
 def _http_get_json(cfg: FmpConfig, *, url: str) -> Any:
     last_err: Exception | None = None
     for attempt in range(cfg.max_retries):
@@ -108,8 +123,16 @@ def _http_get_json(cfg: FmpConfig, *, url: str) -> Any:
             if 500 <= resp.status_code < 600:
                 time.sleep(2 ** attempt)
                 continue
+            if resp.status_code in (401, 402, 403):
+                # 認証 / プラン制限。リトライしても解決しないので即時失敗させる。
+                body = (resp.text or "").strip()[:500]
+                raise FmpHttpError(
+                    f"FMP {resp.status_code} for {_redact_apikey(url)}: {body}"
+                )
             resp.raise_for_status()
             return resp.json()
+        except FmpHttpError:
+            raise
         except (requests.RequestException, ValueError) as e:
             last_err = e
             time.sleep(2 ** attempt)
@@ -161,31 +184,48 @@ def fmp_stock_screener(
     exchange_list: list[str] | None = None,
     ttl_seconds: int = 7 * 24 * 3600,
 ) -> list[dict[str, Any]]:
-    """``/stock-screener`` でユニバースを取得.
+    """``/stable/company-screener`` でユニバースを取得.
 
     時価総額バンド + ETF 除外 + 上場中 + 米国 + NYSE/NASDAQ。
+
+    Note:
+        2026年時点で旧 ``/api/v3/stock-screener`` は Starter 以上で 403 を返す。
+        stable では ``/company-screener`` に名前が変わっている。
+        ``exchange`` は1値のみ受け付けるため、複数取引所はループで集約する。
     """
-    exchanges = exchange_list or ["nyse", "nasdaq"]
-    params: dict[str, Any] = {
-        "marketCapMoreThan": market_cap_more_than,
-        "marketCapLowerThan": market_cap_lower_than,
-        "isEtf": "false" if not is_etf else "true",
-        "isActivelyTrading": "true" if is_actively_trading else "false",
-        "country": country,
-        "exchange": ",".join(exchanges),
-        "limit": 5000,
-    }
-    cache_key = f"screener_{market_cap_more_than}_{market_cap_lower_than}_{country}_{'-'.join(exchanges)}"
-    payload = fmp_get(
-        cfg,
-        endpoint="stock-screener",
-        cache_key=cache_key,
-        params=params,
-        ttl_seconds=ttl_seconds,
-    )
-    if isinstance(payload, list):
-        return payload
-    return []
+    exchanges = exchange_list or ["NYSE", "NASDAQ"]
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ex in exchanges:
+        params: dict[str, Any] = {
+            "marketCapMoreThan": market_cap_more_than,
+            "marketCapLowerThan": market_cap_lower_than,
+            "isEtf": "false" if not is_etf else "true",
+            "isActivelyTrading": "true" if is_actively_trading else "false",
+            "country": country,
+            "exchange": ex,
+            "limit": 5000,
+        }
+        cache_key = (
+            f"screener_{market_cap_more_than}_{market_cap_lower_than}_{country}_{ex}"
+        )
+        payload = fmp_get(
+            cfg,
+            endpoint="company-screener",
+            cache_key=cache_key,
+            params=params,
+            ttl_seconds=ttl_seconds,
+        )
+        if isinstance(payload, list):
+            for r in payload:
+                if not isinstance(r, dict):
+                    continue
+                sym = str(r.get("symbol") or "").strip().upper()
+                if not sym or sym in seen:
+                    continue
+                seen.add(sym)
+                rows.append(r)
+    return rows
 
 
 def fmp_income_statement_quarter(
@@ -193,9 +233,9 @@ def fmp_income_statement_quarter(
 ) -> list[dict[str, Any]]:
     payload = fmp_get(
         cfg,
-        endpoint=f"income-statement/{ticker}",
+        endpoint="income-statement",
         cache_key=f"income_q_{ticker}",
-        params={"period": "quarter", "limit": limit},
+        params={"symbol": ticker, "period": "quarter", "limit": limit},
         ttl_seconds=ttl_seconds,
     )
     if isinstance(payload, list):
@@ -208,9 +248,9 @@ def fmp_key_metrics_quarter(
 ) -> list[dict[str, Any]]:
     payload = fmp_get(
         cfg,
-        endpoint=f"key-metrics/{ticker}",
+        endpoint="key-metrics",
         cache_key=f"key_metrics_q_{ticker}",
-        params={"period": "quarter", "limit": limit},
+        params={"symbol": ticker, "period": "quarter", "limit": limit},
         ttl_seconds=ttl_seconds,
     )
     if isinstance(payload, list):
@@ -223,9 +263,9 @@ def fmp_ratios_quarter(
 ) -> list[dict[str, Any]]:
     payload = fmp_get(
         cfg,
-        endpoint=f"ratios/{ticker}",
+        endpoint="ratios",
         cache_key=f"ratios_q_{ticker}",
-        params={"period": "quarter", "limit": limit},
+        params={"symbol": ticker, "period": "quarter", "limit": limit},
         ttl_seconds=ttl_seconds,
     )
     if isinstance(payload, list):
@@ -240,14 +280,27 @@ def fmp_historical_price(
     days: int = 365,
     ttl_seconds: int = 2 * 24 * 3600,
 ) -> list[dict[str, Any]]:
-    """日足の終値・出来高履歴を取得（直近 ``days`` 日）."""
+    """日足の終値・出来高履歴を取得（直近 ``days`` 日）.
+
+    stable では ``/historical-price-eod/full?symbol=XXX&from=YYYY-MM-DD&to=YYYY-MM-DD``。
+    レスポンスは ``[{date, open, high, low, close, volume, ...}, ...]``（配列）。
+    旧 v3 と違って ``{symbol, historical:[...]}`` ではない点に注意。
+    """
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days + 14)  # 余裕を持たせる
     payload = fmp_get(
         cfg,
-        endpoint=f"historical-price-full/{ticker}",
+        endpoint="historical-price-eod/full",
         cache_key=f"hist_{ticker}_{days}",
-        params={"timeseries": days},
+        params={
+            "symbol": ticker,
+            "from": start.isoformat(),
+            "to": today.isoformat(),
+        },
         ttl_seconds=ttl_seconds,
     )
+    if isinstance(payload, list):
+        return payload
     if isinstance(payload, dict):
         hist = payload.get("historical")
         if isinstance(hist, list):
@@ -260,12 +313,15 @@ def fmp_company_profile(
 ) -> dict[str, Any] | None:
     payload = fmp_get(
         cfg,
-        endpoint=f"profile/{ticker}",
+        endpoint="profile",
         cache_key=f"profile_{ticker}",
+        params={"symbol": ticker},
         ttl_seconds=ttl_seconds,
     )
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
         return payload[0]
+    if isinstance(payload, dict):
+        return payload
     return None
 
 
@@ -274,16 +330,15 @@ def fmp_analyst_estimates_count(
 ) -> int | None:
     """アナリスト推定の数（半信半疑度の代理指標）.
 
-    FMP の ``/analyst-estimates/{ticker}`` から直近の推定数を取り、
-    ``numberAnalystEstimatedRevenue`` などを利用する。
-    存在しない / 取得失敗時は None。
+    stable: ``/analyst-estimates?symbol=XXX&period=quarter&page=0&limit=1``
+    レスポンスの ``numberAnalystEstimatedRevenue`` を読む（無ければ None）。
     """
     try:
         payload = fmp_get(
             cfg,
-            endpoint=f"analyst-estimates/{ticker}",
+            endpoint="analyst-estimates",
             cache_key=f"estimates_{ticker}",
-            params={"period": "quarter", "limit": 1},
+            params={"symbol": ticker, "period": "quarter", "page": 0, "limit": 1},
             ttl_seconds=ttl_seconds,
         )
     except Exception:

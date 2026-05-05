@@ -172,7 +172,7 @@ def build_universe(
                         "exchange": prof.get("exchangeShortName") or prof.get("exchange"),
                         "sector": prof.get("sector"),
                         "industry": prof.get("industry"),
-                        "market_cap_usd": prof.get("mktCap"),
+                        "market_cap_usd": prof.get("marketCap") or prof.get("mktCap"),
                         "country": prof.get("country") or "US",
                         "is_forced_include": True,
                         "include_reason": inc.get("reason"),
