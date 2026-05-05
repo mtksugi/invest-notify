@@ -228,49 +228,88 @@ def fmp_stock_screener(
     return rows
 
 
-def fmp_income_statement_quarter(
-    cfg: FmpConfig, *, ticker: str, limit: int = 8, ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
-) -> list[dict[str, Any]]:
+def fmp_income_statement(
+    cfg: FmpConfig,
+    *,
+    ticker: str,
+    limit: int = 8,
+    ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+) -> tuple[list[dict[str, Any]], str]:
+    """損益計算書を取得.
+
+    Starter プランは ``period=quarter`` が 402 になるため、
+    quarter を試して失敗したら annual に自動フォールバックする。
+
+    Returns:
+        ``(rows, period)`` — period は ``"quarter"`` または ``"annual"``。
+    """
+    # まず quarter を試す
+    try:
+        payload = fmp_get(
+            cfg,
+            endpoint="income-statement",
+            cache_key=f"income_q_{ticker}",
+            params={"symbol": ticker, "period": "quarter", "limit": limit},
+            ttl_seconds=ttl_seconds,
+        )
+        if isinstance(payload, list) and payload:
+            return payload, "quarter"
+    except FmpHttpError as e:
+        # 402: プラン制限 → annual fallback
+        if "402" not in str(e):
+            raise
+
+    # annual fallback
     payload = fmp_get(
         cfg,
         endpoint="income-statement",
-        cache_key=f"income_q_{ticker}",
-        params={"symbol": ticker, "period": "quarter", "limit": limit},
+        cache_key=f"income_a_{ticker}",
+        params={"symbol": ticker, "period": "annual", "limit": min(limit, 5)},
         ttl_seconds=ttl_seconds,
     )
     if isinstance(payload, list):
-        return payload
-    return []
+        return payload, "annual"
+    return [], "annual"
 
 
-def fmp_key_metrics_quarter(
-    cfg: FmpConfig, *, ticker: str, limit: int = 8, ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
-) -> list[dict[str, Any]]:
+def fmp_key_metrics_ttm(
+    cfg: FmpConfig, *, ticker: str, ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
+) -> dict[str, Any] | None:
+    """直近12ヶ月（TTM）の key metrics 1件を返す.
+
+    Starter プランで利用可能（quarterly key-metrics は Premium 限定）。
+    ``priceToSalesRatioTTM``, ``peRatioTTM`` などのキーが入る。
+    """
     payload = fmp_get(
         cfg,
-        endpoint="key-metrics",
-        cache_key=f"key_metrics_q_{ticker}",
-        params={"symbol": ticker, "period": "quarter", "limit": limit},
+        endpoint="key-metrics-ttm",
+        cache_key=f"key_metrics_ttm_{ticker}",
+        params={"symbol": ticker},
         ttl_seconds=ttl_seconds,
     )
-    if isinstance(payload, list):
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict):
         return payload
-    return []
+    return None
 
 
-def fmp_ratios_quarter(
-    cfg: FmpConfig, *, ticker: str, limit: int = 8, ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
-) -> list[dict[str, Any]]:
+def fmp_ratios_ttm(
+    cfg: FmpConfig, *, ticker: str, ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
+) -> dict[str, Any] | None:
+    """直近12ヶ月（TTM）の ratios 1件を返す（Starter プラン可）."""
     payload = fmp_get(
         cfg,
-        endpoint="ratios",
-        cache_key=f"ratios_q_{ticker}",
-        params={"symbol": ticker, "period": "quarter", "limit": limit},
+        endpoint="ratios-ttm",
+        cache_key=f"ratios_ttm_{ticker}",
+        params={"symbol": ticker},
         ttl_seconds=ttl_seconds,
     )
-    if isinstance(payload, list):
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict):
         return payload
-    return []
+    return None
 
 
 def fmp_historical_price(
@@ -330,21 +369,29 @@ def fmp_analyst_estimates_count(
 ) -> int | None:
     """アナリスト推定の数（半信半疑度の代理指標）.
 
-    stable: ``/analyst-estimates?symbol=XXX&period=quarter&page=0&limit=1``
+    stable: ``/analyst-estimates?symbol=XXX&period=annual&page=0&limit=1``
+    Starter プランでは quarter は 402 になる場合があるので annual を使う。
     レスポンスの ``numberAnalystEstimatedRevenue`` を読む（無ければ None）。
     """
-    try:
-        payload = fmp_get(
-            cfg,
-            endpoint="analyst-estimates",
-            cache_key=f"estimates_{ticker}",
-            params={"symbol": ticker, "period": "quarter", "page": 0, "limit": 1},
-            ttl_seconds=ttl_seconds,
-        )
-    except Exception:
-        return None
+    payload: Any = None
+    for period in ("annual", "quarter"):
+        try:
+            payload = fmp_get(
+                cfg,
+                endpoint="analyst-estimates",
+                cache_key=f"estimates_{period}_{ticker}",
+                params={"symbol": ticker, "period": period, "page": 0, "limit": 1},
+                ttl_seconds=ttl_seconds,
+            )
+            break
+        except Exception:
+            continue
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-        for k in ("numberAnalystEstimatedRevenue", "numberAnalystsEstimatedRevenue"):
+        for k in (
+            "numberAnalystEstimatedRevenue",
+            "numberAnalystsEstimatedRevenue",
+            "estimatedRevenueAnalystCount",
+        ):
             v = payload[0].get(k)
             if isinstance(v, (int, float)):
                 return int(v)

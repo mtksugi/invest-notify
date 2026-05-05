@@ -217,6 +217,7 @@ def score_candidate(
 
     metrics: dict[str, Any] = {}
     if fundamentals is not None:
+        metrics["period_type"] = fundamentals.period_type
         metrics["revenue_yoy_4q"] = fundamentals.revenue_yoy_4q
         metrics["operating_margin_4q"] = fundamentals.operating_margin_4q
         metrics["shares_diluted_yoy"] = fundamentals.shares_diluted_yoy

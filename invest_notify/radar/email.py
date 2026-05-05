@@ -224,14 +224,15 @@ def render_radar_weekly_email(
 
 def _text_block_for_candidate(c: dict[str, Any], *, idx: int) -> str:
     metrics = c.get("metrics") or {}
+    period_label = "4Q" if (metrics.get("period_type") == "quarter") else "4Y"
     rows: list[str] = []
     rows.append(
         f"{idx}) {c.get('ticker')}  {c.get('name') or ''}  "
         f"市場規模 {_fmt_money(c.get('market_cap_usd'))} / セクター: {c.get('sector') or 'n/a'}"
     )
-    rows.append(f"   - 売上 YoY (4Q): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}")
+    rows.append(f"   - 売上 YoY ({period_label}): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}")
     rows.append(
-        f"   - 営業利益率 (4Q): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
+        f"   - 営業利益率 ({period_label}): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
         f"  / consistency={metrics.get('consistency_4q_growth')}"
     )
     rfl = metrics.get("return_from_low_x")
@@ -253,6 +254,7 @@ def _text_block_for_candidate(c: dict[str, Any], *, idx: int) -> str:
 
 def _html_block_for_candidate(c: dict[str, Any]) -> str:
     metrics = c.get("metrics") or {}
+    period_label = "4Q" if (metrics.get("period_type") == "quarter") else "4Y"
     ticker = c.get("ticker") or ""
     link = _yahoo_url(ticker)
     parts: list[str] = []
@@ -269,9 +271,9 @@ def _html_block_for_candidate(c: dict[str, Any]) -> str:
         f"</div>"
     )
     parts.append("<ul style='font-size:13px'>")
-    parts.append(f"<li>売上 YoY (4Q): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}</li>")
+    parts.append(f"<li>売上 YoY ({period_label}): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}</li>")
     parts.append(
-        f"<li>営業利益率 (4Q): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
+        f"<li>営業利益率 ({period_label}): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
         f" / consistency={metrics.get('consistency_4q_growth')}</li>"
     )
     parts.append(
