@@ -229,3 +229,74 @@ python -m invest_notify review-history \
   - [x] Phase 1: FMP 接続 / ユニバース手動生成 / ファンダ・モメンタム取得 / スコアリング / 週次メール / stale 警告
   - [ ] Phase 2: 月次自動ユニバース更新 + 差分ログ
   - [ ] Phase 3: 先週トリガの事後動き集計（履歴 review との連携）
+
+---
+
+## Multibagger Radar（B 系統）の使い方
+
+### 前提
+
+- `.env` に `FMP_API_KEY` を設定（FMP Starter プラン以上）
+- A 系統と同じ `.venv` で動く（追加依存なし）
+
+### 初回セットアップ（半期に一度）
+
+```bash
+python -m invest_notify radar build-universe \
+  --out data/radar/universe.json
+```
+
+`data/radar/exclude.yaml` / `data/radar/include.yaml` を作って編集すれば、永久除外 / 強制追加が可能。テンプレは `invest_notify/radar/{exclude,include}.example.yaml`。
+
+### デバッグ：単一銘柄のファンダ取得
+
+```bash
+python -m invest_notify radar fetch-fundamentals --ticker VRT
+```
+
+### 週次パイプライン（月曜のみ実行する想定）
+
+```bash
+# 本文生成のみ（送信なし）
+python -m invest_notify radar weekly --out-dir data/radar
+
+# 生成 + SMTP 送信
+python -m invest_notify radar send-weekly
+
+# Dry-run（送信なし、生成のみ）
+python -m invest_notify radar send-weekly --dry-run
+
+# 動作確認用に銘柄数を絞る
+python -m invest_notify radar weekly --max-tickers 50
+```
+
+出力:
+
+- `data/radar/candidates.json` — 全銘柄のスコア・状態
+- `data/radar/email.txt` / `data/radar/email.txt.html` — 週次サマリメール本文
+- `data/radar/fundamentals/<TICKER>.json` — ファンダ時系列キャッシュ
+- `data/radar/momentum/<TICKER>.json` — 価格モメンタム
+- `data/radar/_state.json` — 前回 state（状態遷移計算用）
+- `data/radar/_fmp_cache/...` — FMP 生レスポンスキャッシュ
+
+### cron 設定例（A と独立して動かす）
+
+```cron
+# A 系統（既存・毎日 月〜土）
+0 7 * * 1-6  cd ~/invest-notify && .venv/bin/python -m invest_notify run --config config.yaml
+
+# B 系統（新規・月曜のみ）
+30 7 * * 1   cd ~/invest-notify && .venv/bin/python -m invest_notify radar send-weekly
+```
+
+A と B は別プロセスなので、B が落ちても A は影響を受けない（その逆も同様）。
+
+### ユニバースの古さ
+
+`data/radar/universe.json` の `generated_at` が **180日**（半年）を超えると **stale** 状態となる。stale の場合:
+
+- A 系統の毎日メールの冒頭に「⚠ Radar ユニバースが N 日経過しています」警告バナーが入る
+- B 系統の週次メールにも同様の警告が入る
+- 警告が出たらユーザーが手動で `radar build-universe` を再実行する
+
+Phase 2 で月次自動化するまでは、半期手動のオペレーションで運用する。

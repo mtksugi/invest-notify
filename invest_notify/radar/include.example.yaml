@@ -1,0 +1,7 @@
+# 時価総額バンド外でも追跡したい銘柄を強制追加
+# build-universe 時に毎回参照される。
+# `data/radar/include.yaml` にコピーして編集してください（gitignore 対象）。
+
+include:
+  # - ticker: VRT
+  #   reason: ユニバース外でも追跡したい

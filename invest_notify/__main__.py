@@ -13,6 +13,7 @@ from .ai.openai_compat import load_openai_compat_config_from_env_for_stage
 from .ai.stage1 import run_stage1
 from .ai.stage2 import run_stage2
 from .smtp_send import load_smtp_config_from_env, send_email
+from .radar.universe import check_universe_staleness
 
 
 def _load_watch_tickers_from_env() -> list[str]:
@@ -127,6 +128,60 @@ def main() -> int:
         help="when notifications_pool.json exists, use its raw_notifications instead of notifications.json",
     )
 
+    # ---- Multibagger Radar (v0.3) ----
+    p_radar = sp.add_parser("radar", help="Multibagger Radar (weekly screening)")
+    p_radar_sub = p_radar.add_subparsers(dest="radar_cmd", required=True)
+
+    p_radar_bu = p_radar_sub.add_parser(
+        "build-universe", help="(re)build米株 universe (Phase 1: manual semiannual)"
+    )
+    p_radar_bu.add_argument("--config", required=False, help="(reserved) YAML config")
+    p_radar_bu.add_argument("--out", default="data/radar/universe.json")
+    p_radar_bu.add_argument("--exclude", default="data/radar/exclude.yaml")
+    p_radar_bu.add_argument("--include", default="data/radar/include.yaml")
+    p_radar_bu.add_argument("--market-cap-min", type=int, default=500_000_000)
+    p_radar_bu.add_argument("--market-cap-max", type=int, default=30_000_000_000)
+    p_radar_bu.add_argument("--cache-dir", default="data/radar/_fmp_cache")
+
+    p_radar_ff = p_radar_sub.add_parser(
+        "fetch-fundamentals", help="fetch FMP fundamentals/momentum for a single ticker (debug)"
+    )
+    p_radar_ff.add_argument("--ticker", required=True)
+    p_radar_ff.add_argument("--cache-dir", default="data/radar/_fmp_cache")
+
+    p_radar_wk = p_radar_sub.add_parser(
+        "weekly",
+        help="run weekly pipeline (universe -> fundamentals -> momentum -> score -> email body)",
+    )
+    p_radar_wk.add_argument("--config", required=False)
+    p_radar_wk.add_argument("--universe", default="data/radar/universe.json")
+    p_radar_wk.add_argument("--out-dir", default="data/radar")
+    p_radar_wk.add_argument("--cache-dir", default="data/radar/_fmp_cache")
+    p_radar_wk.add_argument("--state", default="data/radar/_state.json")
+    p_radar_wk.add_argument(
+        "--max-tickers",
+        type=int,
+        default=0,
+        help="0=no limit (default). Smaller for debugging.",
+    )
+    p_radar_wk.add_argument(
+        "--skip-when-stale",
+        action="store_true",
+        help="Skip pipeline when universe age >= 180d (still emit stale message).",
+    )
+
+    p_radar_send = p_radar_sub.add_parser(
+        "send-weekly", help="render weekly pipeline and send by SMTP"
+    )
+    p_radar_send.add_argument("--config", required=False)
+    p_radar_send.add_argument("--universe", default="data/radar/universe.json")
+    p_radar_send.add_argument("--out-dir", default="data/radar")
+    p_radar_send.add_argument("--cache-dir", default="data/radar/_fmp_cache")
+    p_radar_send.add_argument("--state", default="data/radar/_state.json")
+    p_radar_send.add_argument("--max-tickers", type=int, default=0)
+    p_radar_send.add_argument("--skip-when-stale", action="store_true")
+    p_radar_send.add_argument("--dry-run", action="store_true")
+
     p_run = sp.add_parser("run", help="collect -> stage1 -> stage2 -> email (one-shot)")
     p_run.add_argument("--config", required=True)
     p_run.add_argument("--lookback-hours", type=int, default=24)
@@ -217,10 +272,10 @@ def main() -> int:
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
+        text_body, html_body = _inject_stale_banner(text_body, html_body)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text_body, encoding="utf-8")
-        # HTMLも同時に出力（確認/デバッグ用）
         out_html = out.with_suffix(out.suffix + ".html") if out.suffix else Path(str(out) + ".html")
         out_html.write_text(html_body, encoding="utf-8")
         print(
@@ -251,6 +306,7 @@ def main() -> int:
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
+        text_body, html_body = _inject_stale_banner(text_body, html_body)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text_body, encoding="utf-8")
@@ -274,6 +330,9 @@ def main() -> int:
         new_state = update_state_with_sent(state, allowed)
         save_state(state_path, new_state)
         return 0
+
+    if args.cmd == "radar":
+        return _dispatch_radar(args)
 
     if args.cmd == "review-history":
         from .review_history import review_history
@@ -337,6 +396,7 @@ def main() -> int:
             price_suppressed = []
         allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=3)
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
+        text_body, html_body = _inject_stale_banner(text_body, html_body)
         email_path.write_text(text_body, encoding="utf-8")
         email_path.with_suffix(email_path.suffix + ".html").write_text(html_body, encoding="utf-8")
         print(
@@ -356,6 +416,144 @@ def main() -> int:
         return 0
 
     raise RuntimeError("unknown command")
+
+
+# ---- Radar helpers ----
+
+
+def _dispatch_radar(args) -> int:
+    from .radar.fmp import load_fmp_config_from_env
+    from .radar.universe import build_universe
+    from .radar.fundamentals import fetch_fundamentals
+    from .radar.momentum import fetch_momentum
+    from .radar.runner import run_weekly
+
+    if args.radar_cmd == "build-universe":
+        cfg = load_fmp_config_from_env(cache_dir=Path(args.cache_dir))
+        out = Path(args.out)
+        obj = build_universe(
+            cfg=cfg,
+            out_path=out,
+            market_cap_min=args.market_cap_min,
+            market_cap_max=args.market_cap_max,
+            exclude_path=Path(args.exclude) if args.exclude else None,
+            include_path=Path(args.include) if args.include else None,
+        )
+        print(
+            f"Wrote universe ({obj['stats']['total']} tickers, "
+            f"excluded={obj['stats']['excluded_manual']}, "
+            f"forced_included={obj['stats']['forced_included']}) -> {out}"
+        )
+        return 0
+
+    if args.radar_cmd == "fetch-fundamentals":
+        cfg = load_fmp_config_from_env(cache_dir=Path(args.cache_dir))
+        f = fetch_fundamentals(cfg, ticker=args.ticker)
+        m = fetch_momentum(cfg, ticker=args.ticker)
+        import json as _json
+
+        out = {
+            "ticker": args.ticker,
+            "fundamentals": f.to_dict() if f else None,
+            "momentum": m.to_dict() if m else None,
+        }
+        print(_json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.radar_cmd == "weekly":
+        cfg = load_fmp_config_from_env(cache_dir=Path(args.cache_dir))
+        out_dir = Path(args.out_dir)
+        result = run_weekly(
+            cfg=cfg,
+            universe_path=Path(args.universe),
+            out_dir=out_dir,
+            fundamentals_dir=out_dir / "fundamentals",
+            momentum_dir=out_dir / "momentum",
+            state_path=Path(args.state),
+            max_tickers=(args.max_tickers if args.max_tickers > 0 else None),
+            skip_when_stale=args.skip_when_stale,
+        )
+        print(f"Wrote radar weekly -> {out_dir} (subject={result['subject']!r})")
+        return 0
+
+    if args.radar_cmd == "send-weekly":
+        cfg = load_fmp_config_from_env(cache_dir=Path(args.cache_dir))
+        out_dir = Path(args.out_dir)
+        result = run_weekly(
+            cfg=cfg,
+            universe_path=Path(args.universe),
+            out_dir=out_dir,
+            fundamentals_dir=out_dir / "fundamentals",
+            momentum_dir=out_dir / "momentum",
+            state_path=Path(args.state),
+            max_tickers=(args.max_tickers if args.max_tickers > 0 else None),
+            skip_when_stale=args.skip_when_stale,
+        )
+        if args.dry_run:
+            print(
+                f"[dry-run] Would send radar weekly email "
+                f"({len(result['candidates'])} candidates). subject={result['subject']!r}"
+            )
+            return 0
+        smtp_cfg = load_smtp_config_from_env()
+        send_email(
+            cfg=smtp_cfg,
+            subject=result["subject"],
+            text_body=result["text_body"],
+            html_body=result["html_body"],
+        )
+        print(f"Sent radar weekly email ({len(result['candidates'])} candidates)")
+        return 0
+
+    raise RuntimeError(f"unknown radar subcommand: {args.radar_cmd}")
+
+
+def _inject_stale_banner(text_body: str, html_body: str) -> tuple[str, str]:
+    """A 系統メールに 'Radar ユニバース要更新' 警告を差し込む.
+
+    universe.json が無い / 180日経過している時のみ警告を入れる。
+    """
+    banner = _maybe_stale_universe_banner()
+    if banner is None:
+        return text_body, html_body
+    text_banner, html_banner = banner
+    new_text = text_banner + text_body
+    if "<body" in html_body:
+        new_html = html_body.replace("<body", "<body", 1)
+        # body 直後に挿入したいので、最初に出てくる '>' を探す
+        idx = new_html.find("<body")
+        if idx >= 0:
+            close = new_html.find(">", idx)
+            if close >= 0:
+                new_html = new_html[: close + 1] + html_banner + new_html[close + 1 :]
+            else:
+                new_html = html_banner + new_html
+        else:
+            new_html = html_banner + new_html
+    else:
+        new_html = html_banner + html_body
+    return new_text, new_html
+
+
+def _maybe_stale_universe_banner(*, universe_path: Path = Path("data/radar/universe.json")) -> tuple[str, str] | None:
+    """A 系統メールに差し込む 'ユニバース要更新' バナー (text, html).
+
+    None を返した場合は警告不要。
+    """
+    try:
+        st = check_universe_staleness(universe_path=universe_path)
+    except Exception:
+        return None
+    if not st.is_stale:
+        return None
+    text = "{}\n\n----\n\n".format(st.message)
+    html_body = (
+        '<div style="background:#fff3cd;border:1px solid #ffeeba;padding:12px;'
+        'border-radius:6px;margin-bottom:16px">'
+        "{}"
+        "</div>"
+    ).format(st.message)
+    return text, html_body
 
 
 if __name__ == "__main__":
