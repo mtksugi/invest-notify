@@ -184,6 +184,7 @@ def fmp_stock_screener(
     market_cap_more_than: int = 500_000_000,
     market_cap_lower_than: int = 30_000_000_000,
     is_etf: bool = False,
+    is_fund: bool = False,
     is_actively_trading: bool = True,
     country: str = "US",
     exchange_list: list[str] | None = None,
@@ -191,12 +192,14 @@ def fmp_stock_screener(
 ) -> list[dict[str, Any]]:
     """``/stable/company-screener`` でユニバースを取得.
 
-    時価総額バンド + ETF 除外 + 上場中 + 米国 + NYSE/NASDAQ。
+    時価総額バンド + ETF/ミューチュアルファンド 除外 + 上場中 + 米国 + NYSE/NASDAQ。
 
     Note:
         2026年時点で旧 ``/api/v3/stock-screener`` は Starter 以上で 403 を返す。
         stable では ``/company-screener`` に名前が変わっている。
         ``exchange`` は1値のみ受け付けるため、複数取引所はループで集約する。
+        ``isFund=false`` を必ず渡さないと NASDAQ 側でミューチュアルファンドが
+        大量（2000+）に混入する点に注意。
     """
     exchanges = exchange_list or ["NYSE", "NASDAQ"]
     rows: list[dict[str, Any]] = []
@@ -206,13 +209,14 @@ def fmp_stock_screener(
             "marketCapMoreThan": market_cap_more_than,
             "marketCapLowerThan": market_cap_lower_than,
             "isEtf": "false" if not is_etf else "true",
+            "isFund": "false" if not is_fund else "true",
             "isActivelyTrading": "true" if is_actively_trading else "false",
             "country": country,
             "exchange": ex,
             "limit": 5000,
         }
         cache_key = (
-            f"screener_{market_cap_more_than}_{market_cap_lower_than}_{country}_{ex}"
+            f"screener_v2_{market_cap_more_than}_{market_cap_lower_than}_{country}_{ex}"
         )
         payload = fmp_get(
             cfg,
@@ -224,6 +228,11 @@ def fmp_stock_screener(
         if isinstance(payload, list):
             for r in payload:
                 if not isinstance(r, dict):
+                    continue
+                # API パラメータが効いていなくても、サーバ側で isFund / isEtf が true の行は除外
+                if not is_fund and r.get("isFund") is True:
+                    continue
+                if not is_etf and r.get("isEtf") is True:
                     continue
                 sym = str(r.get("symbol") or "").strip().upper()
                 if not sym or sym in seen:
