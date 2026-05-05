@@ -44,6 +44,36 @@ def _fmt_pct_no_sign(x: Any) -> str:
         return "n/a"
 
 
+def _fmt_num(x: Any, *, decimals: int = 2) -> str:
+    if x is None:
+        return "n/a"
+    try:
+        return f"{float(x):.{decimals}f}"
+    except Exception:
+        return "n/a"
+
+
+def _fmt_consistency(x: Any) -> str:
+    if x is None:
+        return "n/a"
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return "n/a"
+
+
+def _fmt_scores(d: Any) -> str:
+    if not isinstance(d, dict):
+        return "n/a"
+    parts = []
+    for k, v in d.items():
+        try:
+            parts.append(f"{k}={float(v):.2f}")
+        except Exception:
+            parts.append(f"{k}=n/a")
+    return ", ".join(parts)
+
+
 def _fmt_money(x: Any) -> str:
     if x is None:
         return "n/a"
@@ -147,7 +177,11 @@ def render_radar_weekly_email(
     if overheated:
         L.append(f"== 過熱降格（{n_overheated} 件、参考） ==")
         for c in overheated[:10]:
-            L.append(f"- {c.get('ticker')}  PSR={c.get('metrics', {}).get('latest_psr')}")
+            psr = c.get("metrics", {}).get("latest_psr")
+            rfl = c.get("metrics", {}).get("return_from_low_x")
+            L.append(
+                f"- {c.get('ticker')}  PSR={_fmt_num(psr, decimals=2)} / 底から {_fmt_x(rfl)}"
+            )
         L.append("")
 
     L.append("--")
@@ -233,7 +267,7 @@ def _text_block_for_candidate(c: dict[str, Any], *, idx: int) -> str:
     rows.append(f"   - 売上 YoY ({period_label}): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}")
     rows.append(
         f"   - 営業利益率 ({period_label}): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
-        f"  / consistency={metrics.get('consistency_4q_growth')}"
+        f"  / consistency={_fmt_consistency(metrics.get('consistency_4q_growth'))}"
     )
     rfl = metrics.get("return_from_low_x")
     over_pct = metrics.get("over_sma_200_pct")
@@ -241,11 +275,15 @@ def _text_block_for_candidate(c: dict[str, Any], *, idx: int) -> str:
         f"   - 株価: 底から {_fmt_x(rfl)} / 200日線 {_fmt_pct(over_pct)} / "
         f"出来高比 20:60 = {_fmt_x(metrics.get('vol_ratio_20_60'))}"
     )
+    psr = metrics.get("latest_psr")
+    pe = metrics.get("latest_pe")
     rows.append(
-        f"   - PSR: {metrics.get('latest_psr')} / 希薄化YoY: {_fmt_pct(metrics.get('shares_diluted_yoy'))}"
-        f" / アナリスト: {metrics.get('analyst_count')}"
+        f"   - PSR: {_fmt_num(psr, decimals=2)} / PER: {_fmt_num(pe, decimals=2)} / "
+        f"希薄化YoY: {_fmt_pct(metrics.get('shares_diluted_yoy'))} / アナリスト: {metrics.get('analyst_count')}"
     )
-    rows.append(f"   - total: {c.get('total')} / 内訳: {c.get('scores')}")
+    rows.append(
+        f"   - total: {_fmt_num(c.get('total'), decimals=3)} / 内訳: {_fmt_scores(c.get('scores'))}"
+    )
     if c.get("trigger_reasons"):
         rows.append(f"   - 理由: {', '.join(c.get('trigger_reasons') or [])}")
     rows.append(f"   - Yahoo: {_yahoo_url(c.get('ticker') or '')}")
@@ -274,7 +312,7 @@ def _html_block_for_candidate(c: dict[str, Any]) -> str:
     parts.append(f"<li>売上 YoY ({period_label}): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}</li>")
     parts.append(
         f"<li>営業利益率 ({period_label}): {_yoy_chain_str(metrics.get('operating_margin_4q'))}"
-        f" / consistency={metrics.get('consistency_4q_growth')}</li>"
+        f" / consistency={_fmt_consistency(metrics.get('consistency_4q_growth'))}</li>"
     )
     parts.append(
         f"<li>株価: 底から {_fmt_x(metrics.get('return_from_low_x'))} / "
@@ -282,10 +320,15 @@ def _html_block_for_candidate(c: dict[str, Any]) -> str:
         f"出来高比 20:60 = {_fmt_x(metrics.get('vol_ratio_20_60'))}</li>"
     )
     parts.append(
-        f"<li>PSR: {metrics.get('latest_psr')} / 希薄化 YoY: {_fmt_pct(metrics.get('shares_diluted_yoy'))} "
-        f"/ アナリスト: {metrics.get('analyst_count')}</li>"
+        f"<li>PSR: {_fmt_num(metrics.get('latest_psr'), decimals=2)} / "
+        f"PER: {_fmt_num(metrics.get('latest_pe'), decimals=2)} / "
+        f"希薄化 YoY: {_fmt_pct(metrics.get('shares_diluted_yoy'))} / "
+        f"アナリスト: {metrics.get('analyst_count')}</li>"
     )
-    parts.append(f"<li>total: {c.get('total')}</li>")
+    parts.append(
+        f"<li>total: {_fmt_num(c.get('total'), decimals=3)} "
+        f"<span style='color:#888;font-size:12px'>({html.escape(_fmt_scores(c.get('scores')))})</span></li>"
+    )
     if c.get("trigger_reasons"):
         parts.append(f"<li>理由: {html.escape(', '.join(c.get('trigger_reasons') or []))}</li>")
     parts.append("</ul>")
