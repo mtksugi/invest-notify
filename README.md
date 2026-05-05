@@ -270,6 +270,12 @@ python -m invest_notify radar send-weekly --dry-run
 python -m invest_notify radar weekly --max-tickers 50
 ```
 
+> FMP Starter プランは 300 req/分。1 銘柄あたり 6 リクエスト
+> （income-statement / key-metrics-ttm / ratios-ttm / historical-price-eod / analyst-estimates / profile）
+> なので、初回キャッシュ生成時は **概ね 50 銘柄/分** が上限。フルユニバース（4500 銘柄）を
+> 一気に走らせると 90 分以上かかる。429 が連続して詰まるようなら `--max-tickers` で
+> 200〜500 に絞り、複数回に分けてキャッシュを温めるのが安全。
+
 出力:
 
 - `data/radar/candidates.json` — 全銘柄のスコア・状態

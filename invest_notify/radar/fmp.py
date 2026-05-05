@@ -117,10 +117,15 @@ def _http_get_json(cfg: FmpConfig, *, url: str) -> Any:
         try:
             resp = requests.get(url, timeout=cfg.request_timeout_seconds)
             if resp.status_code == 429:
-                # Rate limit: バックオフ
+                last_err = FmpHttpError(
+                    f"FMP 429 (rate limit) for {_redact_apikey(url)}"
+                )
                 time.sleep(2 ** (attempt + 1))
                 continue
             if 500 <= resp.status_code < 600:
+                last_err = FmpHttpError(
+                    f"FMP {resp.status_code} for {_redact_apikey(url)}"
+                )
                 time.sleep(2 ** attempt)
                 continue
             if resp.status_code in (401, 402, 403):
