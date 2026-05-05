@@ -144,7 +144,8 @@ def fetch_fundamentals(
         )
     if latest_pe is None and isinstance(ratios_ttm, dict):
         latest_pe = (
-            _safe_float(ratios_ttm.get("peRatioTTM"))
+            _safe_float(ratios_ttm.get("priceToEarningsRatioTTM"))
+            or _safe_float(ratios_ttm.get("peRatioTTM"))
             or _safe_float(ratios_ttm.get("priceEarningsRatioTTM"))
             or _safe_float(ratios_ttm.get("priceEarningsRatio"))
         )

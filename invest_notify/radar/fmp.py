@@ -388,6 +388,8 @@ def fmp_analyst_estimates_count(
             continue
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
         for k in (
+            "numAnalystsRevenue",
+            "numAnalystsEps",
             "numberAnalystEstimatedRevenue",
             "numberAnalystsEstimatedRevenue",
             "estimatedRevenueAnalystCount",
