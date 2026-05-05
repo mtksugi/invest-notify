@@ -297,6 +297,33 @@ python -m invest_notify radar weekly --max-tickers 50
 
 A と B は別プロセスなので、B が落ちても A は影響を受けない（その逆も同様）。
 
+### 本番投入前の段取り（初回 1 回だけ実施）
+
+`radar send-weekly` を素で叩くと **MAIL_TO 宛に実メールが届く** ので、以下を順に確認する:
+
+```bash
+# (1) 必須シークレット
+.venv/bin/python -c "import os; print('FMP_API_KEY:', 'OK' if os.getenv('FMP_API_KEY') else 'MISSING'); \
+print('SES:', 'OK' if all(os.getenv(k) for k in ['SES_SMTP_HOST','SES_SMTP_USER','SES_SMTP_PASS','MAIL_FROM','MAIL_TO']) else 'MISSING')"
+
+# (2) ユニバース生成（半期に一度のみ）
+.venv/bin/python -m invest_notify radar build-universe --out data/radar/universe.json
+# → 約 2100 銘柄（米株、$500M〜$30B、ETF/ファンド除外）が出ることを確認
+
+# (3) キャッシュを段階的に温める（dry-run、初回のみ約 60〜90 分）
+.venv/bin/python -m invest_notify radar send-weekly --max-tickers 500  --dry-run   # ~5 分
+.venv/bin/python -m invest_notify radar send-weekly --max-tickers 1500 --dry-run   # ~15 分
+.venv/bin/python -m invest_notify radar send-weekly --dry-run                      # ~25〜40 分（全 ~2100）
+
+# (4) 本文確認
+less data/radar/email.txt
+
+# (5) 納得したら本送信（cron が走る前に手動 1 回試すと安全）
+.venv/bin/python -m invest_notify radar send-weekly
+```
+
+(3) でキャッシュが温まると、以降の cron は数分で完了する（ファンダ TTL 6 日、株価 TTL 2 日）。
+
 ### ユニバースの古さ
 
 `data/radar/universe.json` の `generated_at` が **180日**（半年）を超えると **stale** 状態となる。stale の場合:
