@@ -14,7 +14,7 @@ def iso_now() -> str:
 @dataclass(frozen=True)
 class Fragment:
     """
-    SPEC_MVP_v0.2.md の「7.1 入力：情報断片」準拠のデータ。
+    docs/SPEC_MVP_v0.2.md の「7.1 入力：情報断片」準拠のデータ。
     published_at は不明なら None 可（仕様通り）。
     """
 
