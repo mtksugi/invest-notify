@@ -2,6 +2,15 @@
 
 `SPEC_MVP_v0.2.md` の仕様に基づき、まずは **収集（コネクタ）→ 情報断片JSON生成** までを行うための最小実装です。
 
+> **本来のゴール（再確認）**: 「次の PLTR / APP / SMCI / VRT / CVNA / RKLB / CLS」級の **テーマ初期〜中盤の米株中小型（時価総額 $500M〜$30B）** を、まだ織り込まれていないうちに発掘して通知すること。
+>
+> 現状の日次パイプラインは「場況把握 + 注視銘柄の動向モニタ」として有用だが、上記ゴールには直接は届いていない。そのため、本リポジトリは **2 系統** で運用する:
+>
+> - **A. Daily Watch（既存・補助）**: RSS ベース、毎日（月〜土）。場況把握。
+> - **B. Multibagger Radar（v0.3、主役）**: FMP ベース、**週次（月曜のみ）**。10 バガー候補のスクリーニング → 週次サマリメール。
+>
+> 設計詳細は [`docs/REDESIGN_v0.3.md`](docs/REDESIGN_v0.3.md) を参照。
+
 ### できること（現時点）
 - RSS/Atom から記事を取得し、仕様の「情報断片JSON（最大200件）」を出力する
   - 重複URL除去
@@ -215,3 +224,112 @@ python -m invest_notify review-history \
 - [x] tickerにyahoo financeのリンクがほしい
 - [x] 注視したいティッカーENVに登録 -> そのティッカーのニュースで重要そうなものも通知に含める
 - [ ] 異常終了時の監視（B案（堅牢）: invest_notify run に --healthcheck-url（成功時ping）と --alert-to（例外時メール）を追加する）
+- [x] **Multibagger Radar（v0.3 再設計）**: テーマ初期〜中盤の米株中小型を週次でスクリーニングする系統を新設。詳細は [`docs/REDESIGN_v0.3.md`](docs/REDESIGN_v0.3.md)
+  - [x] Phase 0: 設計ドキュメント / README 更新
+  - [x] Phase 1: FMP 接続 / ユニバース手動生成 / ファンダ・モメンタム取得 / スコアリング / 週次メール / stale 警告
+  - [ ] Phase 2: 月次自動ユニバース更新 + 差分ログ
+  - [ ] Phase 3: 先週トリガの事後動き集計（履歴 review との連携）
+
+---
+
+## Multibagger Radar（B 系統）の使い方
+
+### 前提
+
+- `.env` に `FMP_API_KEY` を設定（FMP Starter プラン以上）
+- A 系統と同じ `.venv` で動く（追加依存なし）
+
+### 初回セットアップ（半期に一度）
+
+```bash
+python -m invest_notify radar build-universe \
+  --out data/radar/universe.json
+```
+
+`data/radar/exclude.yaml` / `data/radar/include.yaml` を作って編集すれば、永久除外 / 強制追加が可能。テンプレは `invest_notify/radar/{exclude,include}.example.yaml`。
+
+### デバッグ：単一銘柄のファンダ取得
+
+```bash
+python -m invest_notify radar fetch-fundamentals --ticker VRT
+```
+
+### 週次パイプライン（月曜のみ実行する想定）
+
+```bash
+# 本文生成のみ（送信なし）
+python -m invest_notify radar weekly --out-dir data/radar
+
+# 生成 + SMTP 送信
+python -m invest_notify radar send-weekly
+
+# Dry-run（送信なし、生成のみ）
+python -m invest_notify radar send-weekly --dry-run
+
+# 動作確認用に銘柄数を絞る
+python -m invest_notify radar weekly --max-tickers 50
+```
+
+> FMP Starter プランは 300 req/分。1 銘柄あたり 6 リクエスト
+> （income-statement / key-metrics-ttm / ratios-ttm / historical-price-eod / analyst-estimates / profile）
+> なので、初回キャッシュ生成時は **概ね 50 銘柄/分** が上限。フルユニバース（4500 銘柄）を
+> 一気に走らせると 90 分以上かかる。429 が連続して詰まるようなら `--max-tickers` で
+> 200〜500 に絞り、複数回に分けてキャッシュを温めるのが安全。
+
+出力:
+
+- `data/radar/candidates.json` — 全銘柄のスコア・状態
+- `data/radar/email.txt` / `data/radar/email.txt.html` — 週次サマリメール本文
+- `data/radar/fundamentals/<TICKER>.json` — ファンダ時系列キャッシュ
+- `data/radar/momentum/<TICKER>.json` — 価格モメンタム
+- `data/radar/_state.json` — 前回 state（状態遷移計算用）
+- `data/radar/_fmp_cache/...` — FMP 生レスポンスキャッシュ
+
+### cron 設定例（A と独立して動かす）
+
+```cron
+# A 系統（既存・毎日 月〜土）
+0 7 * * 1-6  cd ~/invest-notify && .venv/bin/python -m invest_notify run --config config.yaml
+
+# B 系統（新規・月曜のみ）
+30 7 * * 1   cd ~/invest-notify && .venv/bin/python -m invest_notify radar send-weekly
+```
+
+A と B は別プロセスなので、B が落ちても A は影響を受けない（その逆も同様）。
+
+### 本番投入前の段取り（初回 1 回だけ実施）
+
+`radar send-weekly` を素で叩くと **MAIL_TO 宛に実メールが届く** ので、以下を順に確認する:
+
+```bash
+# (1) 必須シークレット
+.venv/bin/python -c "import os; print('FMP_API_KEY:', 'OK' if os.getenv('FMP_API_KEY') else 'MISSING'); \
+print('SES:', 'OK' if all(os.getenv(k) for k in ['SES_SMTP_HOST','SES_SMTP_USER','SES_SMTP_PASS','MAIL_FROM','MAIL_TO']) else 'MISSING')"
+
+# (2) ユニバース生成（半期に一度のみ）
+.venv/bin/python -m invest_notify radar build-universe --out data/radar/universe.json
+# → 約 2100 銘柄（米株、$500M〜$30B、ETF/ファンド除外）が出ることを確認
+
+# (3) キャッシュを段階的に温める（dry-run、初回のみ約 60〜90 分）
+.venv/bin/python -m invest_notify radar send-weekly --max-tickers 500  --dry-run   # ~5 分
+.venv/bin/python -m invest_notify radar send-weekly --max-tickers 1500 --dry-run   # ~15 分
+.venv/bin/python -m invest_notify radar send-weekly --dry-run                      # ~25〜40 分（全 ~2100）
+
+# (4) 本文確認
+less data/radar/email.txt
+
+# (5) 納得したら本送信（cron が走る前に手動 1 回試すと安全）
+.venv/bin/python -m invest_notify radar send-weekly
+```
+
+(3) でキャッシュが温まると、以降の cron は数分で完了する（ファンダ TTL 6 日、株価 TTL 2 日）。
+
+### ユニバースの古さ
+
+`data/radar/universe.json` の `generated_at` が **180日**（半年）を超えると **stale** 状態となる。stale の場合:
+
+- A 系統の毎日メールの冒頭に「⚠ Radar ユニバースが N 日経過しています」警告バナーが入る
+- B 系統の週次メールにも同様の警告が入る
+- 警告が出たらユーザーが手動で `radar build-universe` を再実行する
+
+Phase 2 で月次自動化するまでは、半期手動のオペレーションで運用する。
