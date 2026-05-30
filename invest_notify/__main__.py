@@ -286,6 +286,8 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外（ユーザーが情報を必要とするため）。
+        # 横断クールダウンは「保有外の同一銘柄が短期間に連発する」のを抑えるのが目的。
         allowed, suppressed = filter_recently_sent(
             notifs,
             state=state,
@@ -326,6 +328,8 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外（ユーザーが情報を必要とするため）。
+        # 横断クールダウンは「保有外の同一銘柄が短期間に連発する」のを抑えるのが目的。
         allowed, suppressed = filter_recently_sent(
             notifs,
             state=state,
@@ -423,6 +427,7 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外。
         allowed, suppressed = filter_recently_sent(
             notifs,
             state=state,
