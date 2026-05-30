@@ -1,16 +1,23 @@
 """スコアリング・状態分類.
 
-設計は ``docs/REDESIGN_v0.3.md`` §5 に準拠（単純合算）。
+設計は ``docs/REDESIGN_v0.4.md`` §4/§8 に準拠（ゲート方式 + 順位付け）。
 
-各シグナルを 0〜1 に正規化し、加重なしの平均を取る（MVP は均等重み）。
-取れない指標は 0.5（中立）として総合スコアを歪めない。
+各シグナルを 0〜1 に正規化して ``total``（順位付け用）を出すのは従来どおりだが、
+``trigger`` は **平均点では決めず、コアシグナルの必須ゲート（AND 条件）** で判定する。
+これにより飽和シグナル（size_band 等）の下駄で trigger が量産されるのを防ぐ。
 
-state:
-- ``trigger``      total >= 0.75 AND momentum >= 0.5
-- ``candidate``    total >= 0.60
+state（バランス・プロファイル）:
+- ``trigger``      下記ゲートを全て満たす
+    growth >= GATE_GROWTH(0.60) AND consistency_4q >= GATE_CONSISTENCY(0.67)
+    AND 200日線奪還 AND 底からの倍率 ∈ [ENTRY_LOW_X(1.3), ENTRY_HIGH_X(5.0)]
+    AND valuation_room > 0 AND non_dilutive > 0
+- ``candidate``    total >= 0.60（ゲート未通過だが総合点は高い）
 - ``watch``        total >= 0.40
-- ``overheated``   PSR > 16 OR 株価が底から >= 10 倍
+- ``overheated``   PSR > OVERHEAT_PSR(16) OR 株価が底から >= OVERHEAT_FROM_LOW_X(5.0) 倍
 - ``out``          上記いずれにも該当しない
+
+3〜5x / 〜24か月 を狙うため、エントリー帯を前倒し（底から 1.3〜5.0x）し、
+過熱（取り遅れ）閾値を 10x → 5x に引き下げている。
 """
 
 from __future__ import annotations
@@ -20,6 +27,15 @@ from typing import Any
 
 from .fundamentals import Fundamentals
 from .momentum import Momentum
+
+
+# --- trigger ゲートのパラメータ（docs/REDESIGN_v0.4.md §8 = バランス） ---
+GATE_GROWTH = 0.60
+GATE_CONSISTENCY = 0.67
+ENTRY_LOW_X = 1.3
+ENTRY_HIGH_X = 5.0
+OVERHEAT_FROM_LOW_X = 5.0
+OVERHEAT_PSR = 16.0
 
 
 THEME_FRIENDLY_SECTORS = {
@@ -164,9 +180,9 @@ def _score_skepticism(m: Momentum | None, fundamentals: Fundamentals | None) -> 
 
 
 def _is_overheated(m: Momentum | None, f: Fundamentals | None) -> bool:
-    if m is not None and m.return_from_low_x is not None and m.return_from_low_x >= 10.0:
+    if m is not None and m.return_from_low_x is not None and m.return_from_low_x >= OVERHEAT_FROM_LOW_X:
         return True
-    if f is not None and f.latest_psr is not None and f.latest_psr > 16.0:
+    if f is not None and f.latest_psr is not None and f.latest_psr > OVERHEAT_PSR:
         return True
     return False
 
@@ -203,10 +219,22 @@ def score_candidate(
     }
     total = sum(scores.values()) / len(scores)
 
+    # --- ゲート方式（飽和シグナルの下駄を排除） ---
+    rfl = momentum.return_from_low_x if momentum is not None else None
+    over_sma = bool(momentum.over_sma_200) if momentum is not None else False
+    gate_pass = (
+        s_growth >= GATE_GROWTH
+        and s_consist >= GATE_CONSISTENCY
+        and over_sma
+        and (rfl is not None and ENTRY_LOW_X <= rfl <= ENTRY_HIGH_X)
+        and s_valuation > 0
+        and s_dilute > 0
+    )
+
     overheated = _is_overheated(momentum, fundamentals)
     if overheated:
         state = "overheated"
-    elif total >= 0.75 and s_mom >= 0.5:
+    elif gate_pass:
         state = "trigger"
     elif total >= 0.60:
         state = "candidate"
@@ -225,6 +253,7 @@ def score_candidate(
         metrics["latest_pe"] = fundamentals.latest_pe
         metrics["consistency_4q_growth"] = fundamentals.consistency_4q_growth
         metrics["analyst_count"] = fundamentals.analyst_count
+        metrics["latest_fiscal_date"] = fundamentals.latest_fiscal_date
     if momentum is not None:
         metrics["last_close"] = momentum.last_close
         metrics["over_sma_200"] = momentum.over_sma_200

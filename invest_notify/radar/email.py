@@ -97,171 +97,150 @@ def _yoy_chain_str(yoy_4q: list[Any] | None) -> str:
     return " → ".join(parts)
 
 
+_EVENT_LABEL = {
+    "EARNINGS_NOTABLE": "決算",
+    "TIER_UP": "昇格",
+    "BREAKOUT": "ブレイク",
+}
+
+
+def _event_headline(e: dict[str, Any]) -> str:
+    typ = e.get("type")
+    if typ == "EARNINGS_NOTABLE":
+        d = e.get("direction")
+        mark = "▼ネガ決算" if d == "negative" else "▲特筆決算"
+        return f"[{mark}] " + "・".join(e.get("reasons") or [])
+    if typ == "TIER_UP":
+        return f"[昇格] {e.get('from')} → {e.get('to')}"
+    if typ == "BREAKOUT":
+        return "[ブレイク] " + "・".join(e.get("reasons") or [])
+    return f"[{_EVENT_LABEL.get(typ, typ)}]"
+
+
 def render_radar_weekly_email(
     *,
     candidates: list[dict[str, Any]],
-    transitions: dict[str, list[dict[str, Any]]] | None = None,
+    earnings: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None,
+    transitions: dict[str, Any] | None = None,
     universe_status: dict[str, Any] | None = None,
-    last_week_triggers: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str, str]:
-    """returns (subject, text_body, html_body)."""
+    """イベント駆動メールを生成。returns (subject, text_body, html_body)."""
     today = datetime.now(timezone.utc).astimezone().date().isoformat()
-
-    triggers = [c for c in candidates if c.get("state") == "trigger"]
-    cands = [c for c in candidates if c.get("state") == "candidate"]
-    overheated = [c for c in candidates if c.get("state") == "overheated"]
-
+    earnings = earnings or []
+    events = events or []
     transitions = transitions or {}
-    promoted = transitions.get("promoted") or []
-    demoted = transitions.get("demoted") or []
-    new_in = transitions.get("new_in") or []
-    dropped = transitions.get("dropped") or []
 
-    n_trigger = len(triggers)
-    n_cand = len(cands)
-    n_overheated = len(overheated)
-    n_promoted = len(promoted)
+    n_earn = len(earnings)
+    n_events = len(events)
+    n_promoted = int(transitions.get("promoted") or 0)
+    n_demoted = int(transitions.get("demoted") or 0)
+    n_new = int(transitions.get("new_in") or 0)
 
-    subject = f"[Radar Weekly] {today} トリガ{n_trigger} / 候補{n_cand} / 昇格{n_promoted} / 過熱{n_overheated}"
+    n_trigger = sum(1 for c in candidates if c.get("state") == "trigger")
+    n_cand = sum(1 for c in candidates if c.get("state") == "candidate")
+
+    # 殿堂入り: trigger だが今週の新着イベント/決算が無い銘柄（反復させない）
+    featured = {e.get("ticker") for e in (earnings + events)}
+    hall = [c for c in candidates if c.get("state") == "trigger" and c.get("ticker") not in featured]
+    hall_tickers = [str(c.get("ticker")) for c in sorted(hall, key=lambda c: float(c.get("total") or 0), reverse=True)]
+
+    subject = f"[Radar Weekly] {today} 新着{n_events} / 決算{n_earn} / 昇格{n_promoted}"
 
     # ----------- text -----------
-    L: list[str] = []
-    L.append(subject)
-    L.append("")
-
+    L: list[str] = [subject, ""]
     if universe_status and universe_status.get("is_stale"):
-        L.append("⚠ ユニバースが古くなっています:")
-        L.append(f"  {universe_status.get('message', '')}")
-        L.append("")
+        L += ["⚠ ユニバースが古くなっています:", f"  {universe_status.get('message', '')}", ""]
     elif universe_status:
-        L.append(f"[ユニバース] {universe_status.get('message', '')}")
-        L.append("")
+        L += [f"[ユニバース] {universe_status.get('message', '')}", ""]
 
-    L.append(f"== 今週のトリガ（{n_trigger} 件） ==")
-    if not triggers:
-        L.append("（鳴っていません。これは異常ではなく、本系統は鳴らない週もあります。）")
-    for i, c in enumerate(triggers[:10], start=1):
+    L.append(f"== 今週の決算（特筆 {n_earn} 件） ==")
+    if not earnings:
+        L.append("（特筆すべき新決算はありません）")
+    for i, e in enumerate(earnings, start=1):
         L.append("")
-        L.append(_text_block_for_candidate(c, idx=i))
+        L.append(f"{i}) {e.get('ticker')}  {_event_headline(e)}")
+        L.append(_text_block_for_candidate(e.get("candidate") or {}))
     L.append("")
 
-    L.append(f"== 候補トップ10（state=candidate, {n_cand} 件中） ==")
-    for c in cands[:10]:
-        L.append(
-            f"- {c.get('ticker')}  total={c.get('total')}  "
-            f"市場規模 {_fmt_money(c.get('market_cap_usd'))} / セクター: {c.get('sector') or 'n/a'}"
-        )
+    L.append(f"== 今週の新着イベント（{n_events} 件） ==")
+    if not events:
+        L.append("（前回通知以降の新しい動きはありません。本系統は鳴らない週もあります。）")
+    for i, e in enumerate(events, start=1):
+        L.append("")
+        L.append(f"{i}) {e.get('ticker')}  {_event_headline(e)}")
+        L.append(_text_block_for_candidate(e.get("candidate") or {}))
     L.append("")
 
-    if promoted or demoted or new_in or dropped:
-        L.append("== 状態遷移（先週比） ==")
-        for t in promoted:
-            L.append(f"- 昇格: {t.get('ticker')} ({t.get('from')} → {t.get('to')})")
-        for t in demoted:
-            L.append(f"- 降格: {t.get('ticker')} ({t.get('from')} → {t.get('to')})")
-        for t in new_in:
-            L.append(f"- 新規入り: {t.get('ticker')} (state={t.get('to')})")
-        for t in dropped:
-            L.append(f"- 圏外: {t.get('ticker')} (state={t.get('from')} → out)")
+    if hall_tickers:
+        L.append(f"== 殿堂入り（高スコア継続・新規材料なし {len(hall_tickers)} 件） ==")
+        L.append("  " + ", ".join(hall_tickers[:40]))
+        L.append("  ※新決算や上位昇格が出たら再掲します。")
         L.append("")
 
-    if last_week_triggers:
-        L.append("== 先週のトリガの事後動き ==")
-        for x in last_week_triggers:
-            L.append(
-                f"- {x.get('ticker')} ({x.get('triggered_at')}): "
-                f"事後リターン {x.get('post_return_pct', 'n/a')}"
-            )
-        L.append("")
-
-    if overheated:
-        L.append(f"== 過熱降格（{n_overheated} 件、参考） ==")
-        for c in overheated[:10]:
-            psr = c.get("metrics", {}).get("latest_psr")
-            rfl = c.get("metrics", {}).get("return_from_low_x")
-            L.append(
-                f"- {c.get('ticker')}  PSR={_fmt_num(psr, decimals=2)} / 底から {_fmt_x(rfl)}"
-            )
-        L.append("")
-
+    L.append("== 状態遷移サマリ ==")
+    L.append(f"  新規昇格 {n_promoted} / 降格 {n_demoted} / 新規入り {n_new}")
+    L.append("")
     L.append("--")
-    L.append("Radar の設計: docs/REDESIGN_v0.3.md")
+    L.append(f"（参考）ユニバース trigger {n_trigger} / candidate {n_cand}")
+    L.append("Radar の設計: docs/REDESIGN_v0.4.md")
     text_body = "\n".join(L)
 
     # ----------- html -----------
     H: list[str] = ['<html><body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; color:#222">']
     H.append(f"<h2>{html.escape(subject)}</h2>")
-
     if universe_status and universe_status.get("is_stale"):
         H.append(
             '<div style="background:#fff3cd;border:1px solid #ffeeba;padding:12px;border-radius:6px;margin-bottom:16px">'
-            f"<strong>⚠ ユニバースが古くなっています</strong><br/>"
-            f"{html.escape(str(universe_status.get('message', '')))}"
-            "</div>"
+            f"<strong>⚠ ユニバースが古くなっています</strong><br/>{html.escape(str(universe_status.get('message', '')))}</div>"
         )
     elif universe_status:
         H.append(
             '<div style="color:#666;margin-bottom:16px;font-size:12px">'
-            f"[ユニバース] {html.escape(str(universe_status.get('message', '')))}"
-            "</div>"
+            f"[ユニバース] {html.escape(str(universe_status.get('message', '')))}</div>"
         )
 
-    H.append(f"<h3>今週のトリガ（{n_trigger} 件）</h3>")
-    if not triggers:
-        H.append("<p>鳴っていません。本系統は鳴らない週もあります。</p>")
-    for c in triggers[:10]:
-        H.append(_html_block_for_candidate(c))
+    H.append(f"<h3>今週の決算（特筆 {n_earn} 件）</h3>")
+    if not earnings:
+        H.append("<p>特筆すべき新決算はありません。</p>")
+    for e in earnings:
+        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(_event_headline(e))}</div>")
+        H.append(_html_block_for_candidate(e.get("candidate") or {}))
 
-    H.append(f"<h3>候補トップ10（state=candidate, {n_cand} 件中）</h3>")
-    H.append("<table style='border-collapse:collapse'>")
-    H.append("<tr style='background:#f5f5f5'><th style='padding:6px 10px;text-align:left'>Ticker</th><th>total</th><th>市場規模</th><th>セクター</th></tr>")
-    for c in cands[:10]:
-        ticker = c.get("ticker") or ""
-        link = _yahoo_url(ticker)
+    H.append(f"<h3>今週の新着イベント（{n_events} 件）</h3>")
+    if not events:
+        H.append("<p>前回通知以降の新しい動きはありません。本系統は鳴らない週もあります。</p>")
+    for e in events:
+        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(_event_headline(e))}</div>")
+        H.append(_html_block_for_candidate(e.get("candidate") or {}))
+
+    if hall_tickers:
+        H.append(f"<h3>殿堂入り（高スコア継続・新規材料なし {len(hall_tickers)} 件）</h3>")
         H.append(
-            f"<tr><td style='padding:4px 10px'><a href='{html.escape(link)}'>{html.escape(str(ticker))}</a></td>"
-            f"<td style='padding:4px 10px'>{c.get('total')}</td>"
-            f"<td style='padding:4px 10px'>{_fmt_money(c.get('market_cap_usd'))}</td>"
-            f"<td style='padding:4px 10px'>{html.escape(str(c.get('sector') or 'n/a'))}</td></tr>"
+            "<p style='color:#555;font-size:13px'>"
+            + ", ".join(html.escape(t) for t in hall_tickers[:40])
+            + "<br/><span style='color:#888'>※新決算や上位昇格が出たら再掲します。</span></p>"
         )
-    H.append("</table>")
 
-    if promoted or demoted or new_in or dropped:
-        H.append("<h3>状態遷移（先週比）</h3>")
-        H.append("<ul>")
-        for t in promoted:
-            H.append(f"<li>昇格: <strong>{html.escape(str(t.get('ticker')))}</strong> ({t.get('from')} → {t.get('to')})</li>")
-        for t in demoted:
-            H.append(f"<li>降格: {html.escape(str(t.get('ticker')))} ({t.get('from')} → {t.get('to')})</li>")
-        for t in new_in:
-            H.append(f"<li>新規入り: {html.escape(str(t.get('ticker')))} (state={t.get('to')})</li>")
-        for t in dropped:
-            H.append(f"<li>圏外: {html.escape(str(t.get('ticker')))} ({t.get('from')} → out)</li>")
-        H.append("</ul>")
-
-    if last_week_triggers:
-        H.append("<h3>先週のトリガの事後動き</h3>")
-        H.append("<ul>")
-        for x in last_week_triggers:
-            H.append(
-                f"<li>{html.escape(str(x.get('ticker')))} ({x.get('triggered_at')}): "
-                f"事後リターン {html.escape(str(x.get('post_return_pct', 'n/a')))}</li>"
-            )
-        H.append("</ul>")
-
-    H.append('<p style="color:#888;font-size:12px;margin-top:24px">設計: docs/REDESIGN_v0.3.md</p>')
+    H.append("<h3>状態遷移サマリ</h3>")
+    H.append(f"<p>新規昇格 {n_promoted} / 降格 {n_demoted} / 新規入り {n_new}</p>")
+    H.append(
+        '<p style="color:#888;font-size:12px;margin-top:24px">'
+        f"（参考）ユニバース trigger {n_trigger} / candidate {n_cand}<br/>設計: docs/REDESIGN_v0.4.md</p>"
+    )
     H.append("</body></html>")
     html_body = "".join(H)
 
     return subject, text_body, html_body
 
 
-def _text_block_for_candidate(c: dict[str, Any], *, idx: int) -> str:
+def _text_block_for_candidate(c: dict[str, Any], *, idx: int | None = None) -> str:
     metrics = c.get("metrics") or {}
     period_label = "4Q" if (metrics.get("period_type") == "quarter") else "4Y"
+    prefix = f"{idx}) " if idx is not None else "   "
     rows: list[str] = []
     rows.append(
-        f"{idx}) {c.get('ticker')}  {c.get('name') or ''}  "
+        f"{prefix}{c.get('ticker')}  {c.get('name') or ''}  "
         f"市場規模 {_fmt_money(c.get('market_cap_usd'))} / セクター: {c.get('sector') or 'n/a'}"
     )
     rows.append(f"   - 売上 YoY ({period_label}): {_yoy_chain_str(metrics.get('revenue_yoy_4q'))}")
