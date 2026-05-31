@@ -58,7 +58,6 @@ def render_email(notifications: list[dict[str, Any]], *, watch_tickers: list[str
 
     def _pre_return_label(n: dict[str, Any]) -> str:
         pre = n.get("pre_return_gate_pct")
-        pre_s = n.get("pre_return_gate_signed_pct")
         w = n.get("pre_return_gate_window_days")
         if pre is None:
             return ""
@@ -67,17 +66,11 @@ def render_email(notifications: list[dict[str, Any]], *, watch_tickers: list[str
             w_i = int(w) if w is not None else 5
         except Exception:
             return ""
-        signed_str = ""
-        if pre_s is not None:
-            try:
-                signed_str = f" / 方向調整後 {float(pre_s):+.1f}%"
-            except Exception:
-                signed_str = ""
         action = n.get("price_gate_action")
         action_str = ""
         if action == "downgrade" or action == "downgraded":
             action_str = " ⚠後追い降格"
-        return f"{pre_f:+.1f}%({w_i}d){signed_str}{action_str}"
+        return f"{pre_f:+.1f}%({w_i}d){action_str}"
 
     def _render_items_text(items: list[dict[str, Any]]):
         for idx, n in enumerate(items, start=1):
