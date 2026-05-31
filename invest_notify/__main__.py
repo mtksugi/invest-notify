@@ -169,6 +169,11 @@ def main() -> int:
         action="store_true",
         help="Skip pipeline when universe age >= 180d (still emit stale message).",
     )
+    p_radar_wk.add_argument(
+        "--no-qualitative",
+        action="store_true",
+        help="Disable the LLM qualitative layer (theme/bull/bear/priced-in on the shortlist).",
+    )
 
     p_radar_send = p_radar_sub.add_parser(
         "send-weekly", help="render weekly pipeline and send by SMTP"
@@ -180,6 +185,7 @@ def main() -> int:
     p_radar_send.add_argument("--state", default="data/radar/_state.json")
     p_radar_send.add_argument("--max-tickers", type=int, default=0)
     p_radar_send.add_argument("--skip-when-stale", action="store_true")
+    p_radar_send.add_argument("--no-qualitative", action="store_true")
     p_radar_send.add_argument("--dry-run", action="store_true")
 
     p_run = sp.add_parser("run", help="collect -> stage1 -> stage2 -> email (one-shot)")
@@ -472,6 +478,7 @@ def _dispatch_radar(args) -> int:
             state_path=Path(args.state),
             max_tickers=(args.max_tickers if args.max_tickers > 0 else None),
             skip_when_stale=args.skip_when_stale,
+            qualitative=not args.no_qualitative,
         )
         print(f"Wrote radar weekly -> {out_dir} (subject={result['subject']!r})")
         return 0
@@ -488,6 +495,7 @@ def _dispatch_radar(args) -> int:
             state_path=Path(args.state),
             max_tickers=(args.max_tickers if args.max_tickers > 0 else None),
             skip_when_stale=args.skip_when_stale,
+            qualitative=not args.no_qualitative,
         )
         if args.dry_run:
             print(

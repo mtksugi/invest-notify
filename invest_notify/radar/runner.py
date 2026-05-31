@@ -32,6 +32,7 @@ def run_weekly(
     state_path: Path,
     max_tickers: int | None = None,
     skip_when_stale: bool = False,
+    qualitative: bool = True,
     verbose: bool = True,
 ) -> dict[str, Any]:
     """週次パイプラインを実行して、メール本文・HTML・candidates.json を生成.
@@ -136,6 +137,10 @@ def run_weekly(
     events = detection["events"]
     transitions = detection["transitions"]
 
+    # 定性レイヤー（ショートリスト＝決算/新着イベントに出た銘柄のみ。LLM で論点付与）
+    if qualitative and (earnings or events):
+        _attach_qualitative(cfg, earnings=earnings, events=events, verbose=verbose)
+
     # メール生成
     subject, text_body, html_body = render_radar_weekly_email(
         candidates=cand_dicts,
@@ -186,6 +191,40 @@ def run_weekly(
 # --- パラメータ（docs/REDESIGN_v0.4.md §8 = バランス） ---
 NOTIFY_COOLDOWN_WEEKS = 8
 MAX_EVENTS = 10
+
+
+def _attach_qualitative(cfg, *, earnings: list, events: list, verbose: bool) -> None:
+    """ショートリストに定性評価を付与（OpenAI 鍵が無ければ静かにスキップ）."""
+    try:
+        from ..ai.openai_compat import load_openai_compat_config_from_env_for_stage
+        from .qualitative import assess_shortlist
+    except Exception:
+        return
+    try:
+        llm_cfg = load_openai_compat_config_from_env_for_stage(stage="stage2")
+    except Exception as ex:
+        if verbose:
+            print(f"[radar] qualitative skipped (no LLM config): {ex}")
+        return
+    # 重複銘柄は1回だけ評価
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for e in earnings + events:
+        c = e.get("candidate") or {}
+        t = c.get("ticker")
+        if t and t not in by_ticker:
+            by_ticker[t] = c
+    try:
+        qual = assess_shortlist(llm_cfg, cfg, candidates=list(by_ticker.values()), verbose=verbose)
+    except Exception as ex:
+        if verbose:
+            print(f"[radar] qualitative failed: {ex}")
+        return
+    for e in earnings + events:
+        c = e.get("candidate") or {}
+        q = qual.get(c.get("ticker"))
+        if q:
+            c["qualitative"] = q
+            e["qualitative"] = q
 
 _STATE_RANK = {"out": 0, "watch": 1, "overheated": 1, "candidate": 2, "trigger": 3}
 
