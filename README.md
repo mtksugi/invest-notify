@@ -152,7 +152,7 @@ python -m invest_notify run --config config.yaml
 `email` / `send` / `run` の実行時、デフォルトで各通知 ticker の直近 5 営業日リターンを
 Yahoo Finance から取得し、以下を行います。
 
-1. メール本文に「直近株価変動: +8.3%(5d) / 方向調整後 +8.3%」のように表示
+1. メール本文に「直近株価変動: +8.3%(5d)」のように表示
 2. `impact=negative` かつ `pre_return <= -10%` は通知を除外
 3. `impact=positive` かつ `pre_return >= +15%` は通知を除外
 4. `confirmed` で `pre_signed >= +10%` または `pre_signed <= -5%` は `early_warning` に降格
