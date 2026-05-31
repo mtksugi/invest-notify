@@ -48,6 +48,7 @@ class Fundamentals:
     latest_pe: float | None
     consistency_4q_growth: float
     analyst_count: int | None
+    latest_fiscal_date: str | None = None  # 直近決算の会計期末（決算デルタ検出用）
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -62,6 +63,7 @@ class Fundamentals:
             "latest_pe": self.latest_pe,
             "consistency_4q_growth": self.consistency_4q_growth,
             "analyst_count": self.analyst_count,
+            "latest_fiscal_date": self.latest_fiscal_date,
         }
         return d
 
@@ -202,6 +204,8 @@ def fetch_fundamentals(
 
     analyst_count = fmp_analyst_estimates_count(cfg, ticker=ticker)
 
+    latest_fiscal_date = quarters_list[0].fiscal_date if quarters_list else None
+
     return Fundamentals(
         ticker=ticker,
         as_of=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -214,6 +218,7 @@ def fetch_fundamentals(
         latest_pe=latest_pe,
         consistency_4q_growth=consistency,
         analyst_count=analyst_count,
+        latest_fiscal_date=latest_fiscal_date,
     )
 
 
