@@ -378,6 +378,37 @@ def fmp_company_profile(
     return None
 
 
+def fmp_stock_news(
+    cfg: FmpConfig,
+    *,
+    ticker: str,
+    limit: int = 15,
+    ttl_seconds: int = 1 * 24 * 3600,
+) -> list[dict[str, Any]]:
+    """銘柄別ニュースを取得（Starter プラン可）.
+
+    stable: ``/news/stock?symbols=XXX&limit=N``。
+    レスポンスは ``[{symbol, publishedDate, publisher, title, image, site, text, url}, ...]``。
+
+    Note:
+        ``/news/press-releases`` は Starter では 402（要上位プラン）。
+        ニュースは鮮度が重要なので TTL は短め（既定 1 日）。
+    """
+    try:
+        payload = fmp_get(
+            cfg,
+            endpoint="news/stock",
+            cache_key=f"news_{ticker}",
+            params={"symbols": ticker, "limit": limit},
+            ttl_seconds=ttl_seconds,
+        )
+    except FmpHttpError:
+        return []
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    return []
+
+
 def fmp_analyst_estimates_count(
     cfg: FmpConfig, *, ticker: str, ttl_seconds: int = 7 * 24 * 3600
 ) -> int | None:

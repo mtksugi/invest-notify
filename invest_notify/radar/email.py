@@ -117,6 +117,44 @@ def _event_headline(e: dict[str, Any]) -> str:
     return f"[{_EVENT_LABEL.get(typ, typ)}]"
 
 
+_THEME_JA = {"structural": "構造成長", "cyclical": "景気循環(一時的)", "unclear": "不明"}
+_PRICED_JA = {"low": "低", "medium": "中", "high": "高"}
+
+
+def _text_qual(q: dict[str, Any]) -> str:
+    theme = _THEME_JA.get(q.get("theme"), "不明")
+    label = q.get("theme_label") or ""
+    rows = [f"   ◆定性(第三者): テーマ={theme}（{label}） / 織り込み={_PRICED_JA.get(q.get('priced_in'),'中')}"]
+    if q.get("bull"):
+        rows.append(f"     強気: {q.get('bull')}")
+    bear = q.get("bear") or []
+    if bear:
+        rows.append("     弱気/リスク: " + " / ".join(str(b) for b in bear[:4]))
+    if q.get("verdict"):
+        rows.append(f"     総括: {q.get('verdict')}")
+    return "\n".join(rows)
+
+
+def _html_qual(q: dict[str, Any]) -> str:
+    theme = _THEME_JA.get(q.get("theme"), "不明")
+    color = {"structural": "#1b7f3b", "cyclical": "#b26a00", "unclear": "#666"}.get(q.get("theme"), "#666")
+    label = html.escape(str(q.get("theme_label") or ""))
+    parts = [
+        f'<div style="background:#f6f8fa;border-left:3px solid {color};padding:8px 12px;margin:4px 0 12px 0;font-size:13px">'
+        f'<div><strong>定性(第三者)</strong>: テーマ=<span style="color:{color}">{theme}</span>'
+        f"（{label}） / 織り込み={_PRICED_JA.get(q.get('priced_in'),'中')}</div>"
+    ]
+    if q.get("bull"):
+        parts.append(f"<div>強気: {html.escape(str(q.get('bull')))}</div>")
+    bear = q.get("bear") or []
+    if bear:
+        parts.append("<div>弱気/リスク: " + html.escape(" / ".join(str(b) for b in bear[:4])) + "</div>")
+    if q.get("verdict"):
+        parts.append(f"<div style='color:#555'>総括: {html.escape(str(q.get('verdict')))}</div>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def render_radar_weekly_email(
     *,
     candidates: list[dict[str, Any]],
@@ -161,6 +199,9 @@ def render_radar_weekly_email(
         L.append("")
         L.append(f"{i}) {e.get('ticker')}  {_event_headline(e)}")
         L.append(_text_block_for_candidate(e.get("candidate") or {}))
+        q = (e.get("candidate") or {}).get("qualitative") or e.get("qualitative")
+        if q:
+            L.append(_text_qual(q))
     L.append("")
 
     L.append(f"== 今週の新着イベント（{n_events} 件） ==")
@@ -170,6 +211,9 @@ def render_radar_weekly_email(
         L.append("")
         L.append(f"{i}) {e.get('ticker')}  {_event_headline(e)}")
         L.append(_text_block_for_candidate(e.get("candidate") or {}))
+        q = (e.get("candidate") or {}).get("qualitative") or e.get("qualitative")
+        if q:
+            L.append(_text_qual(q))
     L.append("")
 
     if hall_tickers:
@@ -204,15 +248,21 @@ def render_radar_weekly_email(
     if not earnings:
         H.append("<p>特筆すべき新決算はありません。</p>")
     for e in earnings:
-        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(_event_headline(e))}</div>")
+        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(str(e.get('ticker') or ''))}  {html.escape(_event_headline(e))}</div>")
         H.append(_html_block_for_candidate(e.get("candidate") or {}))
+        q = (e.get("candidate") or {}).get("qualitative") or e.get("qualitative")
+        if q:
+            H.append(_html_qual(q))
 
     H.append(f"<h3>今週の新着イベント（{n_events} 件）</h3>")
     if not events:
         H.append("<p>前回通知以降の新しい動きはありません。本系統は鳴らない週もあります。</p>")
     for e in events:
-        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(_event_headline(e))}</div>")
+        H.append(f"<div style='font-weight:bold;margin-top:8px'>{html.escape(str(e.get('ticker') or ''))}  {html.escape(_event_headline(e))}</div>")
         H.append(_html_block_for_candidate(e.get("candidate") or {}))
+        q = (e.get("candidate") or {}).get("qualitative") or e.get("qualitative")
+        if q:
+            H.append(_html_qual(q))
 
     if hall_tickers:
         H.append(f"<h3>殿堂入り（高スコア継続・新規材料なし {len(hall_tickers)} 件）</h3>")
