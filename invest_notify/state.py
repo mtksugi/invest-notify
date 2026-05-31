@@ -41,20 +41,41 @@ def filter_recently_sent(
     *,
     state: list[SentEvent],
     window_days: int = 3,
+    ticker_window_days: int = 0,
+    exempt_tickers: set[str] | None = None,
     now: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """
+    """通知の重複抑制。
+
+    2 段階で抑制する:
+
+    1. **(ticker, category) 単位**（既存）: 同一イベントキーを ``window_days`` 日は再通知しない。
+    2. **ticker 単位の横断クールダウン**（``ticker_window_days > 0`` のとき）:
+       同じ銘柄を**カテゴリをまたいで** ``ticker_window_days`` 日は再通知しない。
+       「織り込み済みの巨大企業が何度も鳴る」状態を抑える発見レーン向けの仕組み。
+       - ``exempt_tickers`` に含まれる銘柄（ユーザーの注視ティッカー）と
+         ``bucket == "watch"`` の通知は、横断クールダウンの対象外（明示追跡のため頻度を残す）。
+
     returns: (allowed, suppressed)
     """
     now = now or datetime.now(timezone.utc).replace(microsecond=0)
-    window = timedelta(days=int(window_days))
+    exempt = {t.strip().upper() for t in (exempt_tickers or set()) if isinstance(t, str) and t.strip()}
 
-    cutoff = now - window
+    cutoff = now - timedelta(days=int(window_days))
     recent_ids: set[str] = set()
+    # ticker 横断: 銘柄ごとの直近送信時刻（event_id の "ticker:cat" 前半から復元）
+    ticker_cutoff = now - timedelta(days=int(ticker_window_days))
+    recent_tickers: set[str] = set()
     for e in state:
         dt = _parse_iso(e.sent_at)
-        if dt and dt >= cutoff:
+        if not dt:
+            continue
+        if dt >= cutoff:
             recent_ids.add(e.event_id)
+        if int(ticker_window_days) > 0 and dt >= ticker_cutoff:
+            tk = e.event_id.split(":", 1)[0].strip().upper()
+            if tk:
+                recent_tickers.add(tk)
 
     allowed: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
@@ -64,8 +85,16 @@ def filter_recently_sent(
         eid = f"{ticker}:{cat}"
         if eid in recent_ids:
             suppressed.append(n)
-        else:
-            allowed.append(n)
+            continue
+        is_exempt = (n.get("bucket") == "watch") or (ticker.upper() in exempt)
+        if (
+            int(ticker_window_days) > 0
+            and not is_exempt
+            and ticker.upper() in recent_tickers
+        ):
+            suppressed.append(n)
+            continue
+        allowed.append(n)
     return allowed, suppressed
 
 

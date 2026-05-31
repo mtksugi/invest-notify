@@ -40,6 +40,22 @@ def _load_watch_max_from_env(*, watch_tickers: list[str]) -> int:
     return 3 if watch_tickers else 0
 
 
+def _load_ticker_cooldown_days_from_env() -> int:
+    """発見レーンの銘柄横断クールダウン（日）。
+
+    同じ銘柄をカテゴリをまたいで N 日は再通知しない（注視ティッカーは除外）。
+    「織り込み済みの巨大企業が何度も鳴る」状態を抑える。
+    既定 6 日。``INVEST_NOTIFY_TICKER_COOLDOWN_DAYS=0`` で無効化できる。
+    """
+    raw = os.environ.get("INVEST_NOTIFY_TICKER_COOLDOWN_DAYS", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except Exception:
+            return 6
+    return 6
+
+
 def main() -> int:
     # .env を自動ロード（ローカル開発向け）
     # - 既に環境変数が設定されている場合はそちらを優先したいので override=False
@@ -197,6 +213,7 @@ def main() -> int:
     args = p.parse_args()
     watch_tickers = _load_watch_tickers_from_env()
     watch_max = _load_watch_max_from_env(watch_tickers=watch_tickers)
+    ticker_cooldown_days = _load_ticker_cooldown_days_from_env()
 
     if args.cmd == "collect":
         fragments = collect_fragments(
@@ -269,7 +286,15 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
-        allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外（ユーザーが情報を必要とするため）。
+        # 横断クールダウンは「保有外の同一銘柄が短期間に連発する」のを抑えるのが目的。
+        allowed, suppressed = filter_recently_sent(
+            notifs,
+            state=state,
+            window_days=args.window_days,
+            ticker_window_days=ticker_cooldown_days,
+            exempt_tickers=set(watch_tickers),
+        )
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         text_body, html_body = _inject_stale_banner(text_body, html_body)
@@ -303,7 +328,15 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
-        allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=args.window_days)
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外（ユーザーが情報を必要とするため）。
+        # 横断クールダウンは「保有外の同一銘柄が短期間に連発する」のを抑えるのが目的。
+        allowed, suppressed = filter_recently_sent(
+            notifs,
+            state=state,
+            window_days=args.window_days,
+            ticker_window_days=ticker_cooldown_days,
+            exempt_tickers=set(watch_tickers),
+        )
 
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         text_body, html_body = _inject_stale_banner(text_body, html_body)
@@ -394,7 +427,14 @@ def main() -> int:
             notifs, price_suppressed = annotate_notifications_with_price_gate(notifs)
         else:
             price_suppressed = []
-        allowed, suppressed = filter_recently_sent(notifs, state=state, window_days=3)
+        # 注視ティッカー（＝保有銘柄）はクールダウン対象外。
+        allowed, suppressed = filter_recently_sent(
+            notifs,
+            state=state,
+            window_days=3,
+            ticker_window_days=ticker_cooldown_days,
+            exempt_tickers=set(watch_tickers),
+        )
         subject, text_body, html_body = render_email(allowed, watch_tickers=watch_tickers)
         text_body, html_body = _inject_stale_banner(text_body, html_body)
         email_path.write_text(text_body, encoding="utf-8")
